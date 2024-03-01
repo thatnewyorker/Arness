@@ -105,9 +105,6 @@ impl Cpu6502 {
         self.status = self.pop();
     }
 
-
-
-    // Add more instructions as needed...
 }
 
 // Path: main.rs
