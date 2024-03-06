@@ -373,6 +373,20 @@ pub fn cld(&mut self) {
     }
 */
 
+/* Clear BREAK_COMMAND flag
+ *pub fn clb(&mut self) {
+        self.status &= !BREAK_COMMAND;
+        self.status &= 0b1110_1111;
+    }
+*/
+
+/* Clear ONE flag
+ *pub fn clo(&mut self) {
+        self.status &= !ONE;
+        self.status &= 0b1101_1111;
+    }
+*/
+
 // Clear INTERRUPT_DISABLE flag 
 pub fn cli(&mut self) {
         self.status &= !INTERRUPT_DISABLE;
@@ -393,6 +407,18 @@ pub fn sec(&mut self) {
 /* Set DECIMAL_MODE flag to enter BCD
 pub fn sed(&mut self) {
         self.status |= DECIMAL_MODE;
+    }
+*/
+
+/* Set BREAK_COMMAND flag to enter BCD
+ * pub fn set(&mut self) {
+        self.status |= BREAK_COMMAND;
+    }
+*/
+
+/* Set ONE flag to enter BCD
+ * pub fn sev(&mut self) {
+        self.status |= ONE;
     }
 */
 
