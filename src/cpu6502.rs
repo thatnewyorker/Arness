@@ -1,4 +1,15 @@
-// Define the CPU module
+/* Flags for the status register
+0b0000_0001 = CARRY
+0b0000_0010 = ZERO
+0b0000_0100 = INTERRUPT_DISABLE
+0b0000_1000 = DECIMAL_MODE
+0b0001_0000 = BREAK
+0b0010_0000 = UNUSED
+0b0100_0000 = OVERFLOW
+0b1000_0000 = NEGATIVE
+*/
+
+// Define the CPU module and its implementation
 pub struct Cpu6502 {
     // Registers
     pub a: u8, // Accumulator
@@ -8,8 +19,8 @@ pub struct Cpu6502 {
     pub pc: u16, // Program Counter
     pub status: u8, // Status Register
 
-// Memory (64KB)
-pub memory: [u8; 65536],
+    // Memory (64KB)
+    pub memory: Vec<u8>,
 }
 
 // Implementation of the CPU
@@ -22,12 +33,10 @@ pub fn new() -> Self {
             sp: 0xFD, // Initialized to 0xFD as per 6502's power-up state
             pc: 0x8000, // Commonly used starting address for programs
             status: 0x24, // Default status flags
-            memory: [0; 65536],
+            memory: vec![0; 65536],
         }
     }
 
-// Reset the CPU
-// The reset vector is read from memory location 0xFFFC
 // Load the accumulator with a value
 pub fn lda_immediate(&mut self, value: u8) {
         self.a = value;
@@ -95,33 +104,35 @@ pub fn tsx(&mut self) {
 pub fn txs(&mut self) {
         self.sp = self.x;
     }
+}
 
+impl Cpu6502 {
 
-// Aritmetic instructions
-
-// Add with carry
+// Arithmetic instructions
+// Add with CARRY
 pub fn adc(&mut self, value: u8) {
         let result = self.a as u16 + value as u16 + (self.status & 0b0000_0001) as u16;
-        self.status &= !0b0000_0001; // Clear carry flag
+        self.status &= !0b0000_0001; // Clear CARRY flag
+        self.status &= 0b1111_1110;
         if result > 0xFF {
-            self.status |= 0b0000_0001; // Set carry flag
+            self.status |= 0b0000_0001; // Set CARRY flag
         }
         self.a = result as u8;
         self.update_zero_and_negative_flags(self.a);
     }
 
-// Subtract with carry
+// Subtract with CARRY
 pub fn sbc(&mut self, value: u8) {
         let value = value ^ 0xFF; // Two's complement
         let result = self.a as u16 + value as u16 + (self.status & 0b0000_0001) as u16;
-        self.status &= !0b0000_0001; // Clear carry flag
+        self.status &= !0b0000_0001; // Clear CARRY flag
+        self.status &= 0b1111_1110;
         if result > 0xFF {
-            self.status |= 0b0000_0001; // Set carry flag
+            self.status |= 0b0000_0001; // Set CARRY flag
         }
         self.a = result as u8;
         self.update_zero_and_negative_flags(self.a);
     }
-
 
 // Update the zero and negative flags based on the result
 pub fn update_zero_and_negative_flags(&mut self, result: u8) {
@@ -129,18 +140,21 @@ pub fn update_zero_and_negative_flags(&mut self, result: u8) {
             self.status |= 0b0000_0010; // Set zero flag
         } else {
             self.status &= !0b0000_0010; // Clear zero flag
+            self.status &= 0b1111_1101;
         }
 
         if result & 0b1000_0000 != 0 {
             self.status |= 0b1000_0000; // Set negative flag
         } else {
             self.status &= !0b1000_0000; // Clear negative flag
+            self.status &= 0b0111_1111;
         }
     }
+}
 
+impl Cpu6502 {
 
 // Stack Instructions
-// These instructions transfer data between the stack and the accumulator or the index registers
 pub fn pha(&mut self) {
         self.push(self.a);
     }
@@ -157,18 +171,23 @@ pub fn php(&mut self) {
 pub fn plp(&mut self) {
         self.status = self.pop() | 0b0011_0000; // Set the break and unused flags
     }
+}
+
+impl Cpu6502 {
 
 // These functions are used to read and write to memory
+//  Read a byte from memory
+pub fn read(&self, addr: u16) -> u8 {
+        *self.memory.get(addr as usize).unwrap_or(&0)
+    }
 
-// Read a byte from memory
-pub fn read(&self, addr: u16) -> u8 { 
-        self.memory[addr as usize] 
-    }
-    
 // Write a byte to memory
-pub fn write(&mut self, addr: u16, data: u8) {
-        self.memory[addr as usize] = data;
+pub fn write(&mut self, addr: u16, value: u8) {
+        if addr as usize >= self.memory.len() {
+            self.memory.resize(addr as usize + 1, 0);
     }
+    self.memory[addr as usize] = value;
+}
 
 // Read a 16-bit word from memory
 pub fn read_word(&self, addr: u16) -> u16 {
@@ -184,10 +203,11 @@ pub fn write_word(&mut self, addr: u16, data: u16) {
         self.write(addr, lo);
         self.write(addr + 1, hi);
     }
+}
+
+impl Cpu6502 {
 
 // Stack operations (the stack is located at 0x0100-0x01FF)
-
-// Push a byte to the stack
 pub fn push(&mut self, data: u8) {
         self.write(0x0100 + self.sp as u16, data);
         self.sp = self.sp.wrapping_sub(1);
@@ -212,7 +232,7 @@ pub fn pop_word(&mut self) -> u16 {
         (hi << 8) | lo
     }
 
-    // Status register operations
+// Status register operations
 pub fn pull_status(&mut self) {
         self.status = self.pop();
     }
@@ -221,9 +241,7 @@ pub fn pull_status(&mut self) {
 
 impl Cpu6502 {
 
-// Decrements and Increments
-// These instructions are used to decrement or increment the value of a memory location or a register
-
+// Increment and Decrement
 pub fn dec(&mut self, addr: u16) {
         let value = self.read(addr).wrapping_sub(1);
         self.write(addr, value);
@@ -255,10 +273,11 @@ pub fn iny(&mut self) {
         self.y = self.y.wrapping_add(1);
         self.update_zero_and_negative_flags(self.y);
     }
+}
+
+impl Cpu6502 {
 
 // Logical instructions
-// These instructions perform logical operations on the accumulator and memory
-
 pub fn and(&mut self, value: u8) {
         self.a &= value;
         self.update_zero_and_negative_flags(self.a);
@@ -273,9 +292,11 @@ pub fn ora(&mut self, value: u8) {
         self.a |= value;
         self.update_zero_and_negative_flags(self.a);
     }
+}
+
+impl Cpu6502 {
 
 // Shifts and Rotates
-
 // Arithmetic shift left
 pub fn asl(&mut self, addr: u16) {
         let value = self.read(addr);
@@ -283,9 +304,10 @@ pub fn asl(&mut self, addr: u16) {
         self.write(addr, result);
         self.update_zero_and_negative_flags(result);
         if value & 0b1000_0000 != 0 {
-            self.status |= 0b0000_0001; // Set carry flag
+            self.status |= 0b0000_0001; // Set CARRY flag
         } else {
-            self.status &= !0b0000_0001; // Clear carry flag
+            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= 0b1111_1110;
         }
     }
 
@@ -298,63 +320,72 @@ pub fn lsr(&mut self, addr: u16) {
         if value & 0b0000_0001 != 0 {
             self.status |= 0b0000_0001;
         } else {
-            self.status &= !0b0000_0001; 
+            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= 0b1111_1110;
         }
     }
 
 // Rotate left
-// The carry flag is shifted into bit 0 and bit 7 is shifted into the carry flag
+// The CARRY flag is shifted into bit 0 and bit 7 is shifted into the 0b0000_0001 flag
 pub fn rol(&mut self, addr: u16) {
         let value = self.read(addr);
         let carry = self.status & 0b0000_0001;
-        let result = (value << 1) | carry;
+        let result = (value << 1) | 0b0000_0001;
         self.write(addr, result);
         self.update_zero_and_negative_flags(result);
         if value & 0b1000_0000 != 0 {
             self.status |= 0b0000_0001;
         } else {
-            self.status &= !0b0000_0001;
+            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= 0b1111_1110;
         }
     }
 
 // Rotate right
-// The carry flag is shifted into bit 7 and bit 0 is shifted into the carry flag
+// The CARRY flag is shifted into bit 7 and bit 0 is shifted into the CARRY flag
 pub fn ror(&mut self, addr: u16) {
         let value = self.read(addr);
         let carry = self.status & 0b0000_0001;
-        let result = (value >> 1) | (carry << 7);
+        let result = (value >> 1) | (0b0000_0001 << 7);
         self.write(addr, result);
         self.update_zero_and_negative_flags(result);
         if value & 0b0000_0001 != 0 {
-            self.status |= 0b0000_0001; 
+            self.status |= 0b0000_0001;
         } else {
-            self.status &= !0b0000_0001; 
+            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= 0b1111_1110;
         }
     }
+}
+
+impl Cpu6502 {
 
 // Flag operations
-
-// Clear carry flag
+// Clear CARRY flag
 pub fn clc(&mut self) {
         self.status &= !0b0000_0001;
+        self.status &= 0b1111_1110;
     }
 
 // Clear decimal mode
 pub fn cld(&mut self) {
         self.status &= !0b0000_1000;
+        self.status &= 0b1111_0111;
     }
 
 // Clear interrupt disable
 pub fn cli(&mut self) {
         self.status &= !0b0000_0100;
+        self.status &= 0b1111_1011;
     }
 
 // Clear overflow flag
 pub fn clv(&mut self) {
         self.status &= !0b0100_0000;
+        self.status &= 0b1011_1111;
     }
 
-// Set carry flag
+// Set CARRY flag
 pub fn sec(&mut self) {
         self.status |= 0b0000_0001;
     }
@@ -368,17 +399,18 @@ pub fn sed(&mut self) {
 pub fn sei(&mut self) {
         self.status |= 0b0000_0100;
     }
+}
+
+impl Cpu6502 {
 
 // Comparison instructions
-// These instructions compare the value in the accumulator with another value and set the zero and negative flags based on the result
-// They also set the carry flag if the comparison is true
-
 // Compare the accumulator with a value
 pub fn cmp(&mut self, value: u8) {
         if self.a >= value {
-            self.status |= 0b0000_0001; // Set carry flag
+            self.status |= 0b0000_0001; // Set CARRY flag
         } else {
-            self.status &= !0b0000_0001; // Clear carry flag
+            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= 0b1111_1110;
         }
         let result = self.a.wrapping_sub(value);
         self.update_zero_and_negative_flags(result);
@@ -387,9 +419,10 @@ pub fn cmp(&mut self, value: u8) {
 // Compare the X register with a value
 pub fn cpx(&mut self, value: u8) {
         if self.x >= value {
-            self.status |= 0b0000_0001; // Set carry flag
+            self.status |= 0b0000_0001; // Set CARRY flag
         } else {
-            self.status &= !0b0000_0001; // Clear carry flag
+            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= 0b1111_1110;
         }
         let result = self.x.wrapping_sub(value);
         self.update_zero_and_negative_flags(result);
@@ -398,26 +431,22 @@ pub fn cpx(&mut self, value: u8) {
 // Compare the Y register with a value
 pub fn cpy(&mut self, value: u8) {
         if self.y >= value {
-            self.status |= 0b0000_0001; // Set carry flag
+            self.status |= 0b0000_0001; // Set CARRY flag
         } else {
-            self.status &= !0b0000_0001; // Clear carry flag
+            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= 0b1111_1110;
         }
         let result = self.y.wrapping_sub(value);
         self.update_zero_and_negative_flags(result);
         }
 }
 
-
-// Conditional Branches
-// These instructions are used to change the flow of the program based on the status of the status register
-// They are used to implement loops, if-else statements, and other control structures
-
 impl Cpu6502 {
 
+// Branches
 pub fn branch(&mut self, offset: u8) {
-        let offset = offset as i8;
-        let pc = self.pc as i16;
-        self.pc = (pc + offset as i16) as u16;
+        let offset = offset as i8 as i16; // Convert to signed 16-bit integer
+        self.pc = self.pc.wrapping_add(offset as u16) // Add the offset to the program counter
     }
 
 pub fn bcc(&mut self, offset: u8) {
@@ -467,10 +496,11 @@ pub fn bvs(&mut self, offset: u8) {
             self.branch(offset);
         }
     }
+}
+
+impl Cpu6502 {
 
 // Jumps and Subroutines
-// These instructions are used to change the flow of the program by jumping to a different location in memory
-
 pub fn jmp(&mut self, addr: u16) {
         self.pc = addr;
     }
@@ -484,13 +514,11 @@ pub fn jsr(&mut self, addr: u16) {
 pub fn rts(&mut self) {
         self.pc = self.pop_word() + 1;
     }
+}
+
+impl Cpu6502 {
 
 // Interrupts
-// The BRK instruction is used to generate an IRQ
-// The RTI instruction is used to return from an interrupt
-// The NMI instruction is used to generate a non-maskable interrupt
-// The IRQ instruction is used to generate an IRQ
-
 pub fn brk(&mut self) {
         self.push_word(self.pc);
         self.php();
@@ -516,28 +544,32 @@ pub fn irq(&mut self) {
         self.sei();
         self.pc = self.read_word(0xFFFE);
     }
+}
+
+impl Cpu6502 {
 
 // These instructions perform bitwise operations on the accumulator and memory
-// The bit instruction is used to test a bit in memory
 pub fn bit(&mut self, value: u8) {
         if self.a & value == 0 {
             self.status |= 0b0000_0010; // Set zero flag
         } else {
             self.status &= !0b0000_0010; // Clear zero flag
+            self.status &= 0b1111_1101;
         }
         if value & 0b1000_0000 != 0 {
             self.status |= 0b1000_0000; // Set negative flag
         } else {
             self.status &= !0b1000_0000; // Clear negative flag
+            self.status &= 0b0111_1111;
         }
         if value & 0b0100_0000 != 0 {
             self.status |= 0b0100_0000; // Set overflow flag
         } else {
             self.status &= !0b0100_0000; // Clear overflow flag
+            self.status &= 0b1011_1111;
         }
     }
-
+// No operation
 pub fn nop(&mut self) {
-        // Do nothing
     }
 }
