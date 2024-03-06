@@ -23,7 +23,7 @@ Welcome to Arness, a high-performance Nintendo Entertainment System (NES) emulat
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/thatnewyorker/arness.git
+git clone https://github.com/thatnewyorker/Arness.git
 cd arness
 cargo build --release
 cargo run --release path/to/your/game.rom
