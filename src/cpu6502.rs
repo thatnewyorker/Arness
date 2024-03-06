@@ -1,13 +1,12 @@
-/* Flags for the status register
-0b0000_0001 = CARRY
-0b0000_0010 = ZERO
-0b0000_0100 = INTERRUPT_DISABLE
-0b0000_1000 = DECIMAL_MODE
-0b0001_0000 = BREAK
-0b0010_0000 = UNUSED
-0b0100_0000 = OVERFLOW
-0b1000_0000 = NEGATIVE
-*/
+// Define the status flags
+const CARRY: u8 = 0b0000_0001;
+const ZERO: u8 = 0b0000_0010;
+const INTERRUPT_DISABLE: u8 = 0b0000_0100;
+// const DECIMAL_MODE: u8 = 0b0000_1000; // Unused in NES
+// const BREAK_COMMAND: u8 = 0b0001_0000; // Unused in NES
+// const ONE: u8 = 0b0010_0000; // Unused in NES
+const OVERFLOW: u8 = 0b0100_0000;
+const NEGATIVE: u8 = 0b1000_0000;
 
 // Define the CPU module and its implementation
 pub struct Cpu6502 {
@@ -111,11 +110,11 @@ impl Cpu6502 {
 // Arithmetic instructions
 // Add with CARRY
 pub fn adc(&mut self, value: u8) {
-        let result = self.a as u16 + value as u16 + (self.status & 0b0000_0001) as u16;
-        self.status &= !0b0000_0001; // Clear CARRY flag
+        let result = self.a as u16 + value as u16 + (self.status & CARRY) as u16;
+        self.status &= !CARRY; // Clear CARRY flag
         self.status &= 0b1111_1110;
         if result > 0xFF {
-            self.status |= 0b0000_0001; // Set CARRY flag
+            self.status |= CARRY; // Set CARRY flag
         }
         self.a = result as u8;
         self.update_zero_and_negative_flags(self.a);
@@ -124,11 +123,11 @@ pub fn adc(&mut self, value: u8) {
 // Subtract with CARRY
 pub fn sbc(&mut self, value: u8) {
         let value = value ^ 0xFF; // Two's complement
-        let result = self.a as u16 + value as u16 + (self.status & 0b0000_0001) as u16;
-        self.status &= !0b0000_0001; // Clear CARRY flag
+        let result = self.a as u16 + value as u16 + (self.status & CARRY) as u16;
+        self.status &= !CARRY; // Clear CARRY flag
         self.status &= 0b1111_1110;
         if result > 0xFF {
-            self.status |= 0b0000_0001; // Set CARRY flag
+            self.status |= CARRY; // Set CARRY flag
         }
         self.a = result as u8;
         self.update_zero_and_negative_flags(self.a);
@@ -137,16 +136,16 @@ pub fn sbc(&mut self, value: u8) {
 // Update the zero and negative flags based on the result
 pub fn update_zero_and_negative_flags(&mut self, result: u8) {
         if result == 0 {
-            self.status |= 0b0000_0010; // Set zero flag
+            self.status |= ZERO; // Set zero flag
         } else {
-            self.status &= !0b0000_0010; // Clear zero flag
+            self.status &= !ZERO; // Clear zero flag
             self.status &= 0b1111_1101;
         }
 
-        if result & 0b1000_0000 != 0 {
-            self.status |= 0b1000_0000; // Set negative flag
+        if result & NEGATIVE != 0 {
+            self.status |= NEGATIVE; // Set negative flag
         } else {
-            self.status &= !0b1000_0000; // Clear negative flag
+            self.status &= !NEGATIVE; // Clear negative flag
             self.status &= 0b0111_1111;
         }
     }
@@ -303,10 +302,10 @@ pub fn asl(&mut self, addr: u16) {
         let result = value << 1;
         self.write(addr, result);
         self.update_zero_and_negative_flags(result);
-        if value & 0b1000_0000 != 0 {
-            self.status |= 0b0000_0001; // Set CARRY flag
+        if value & NEGATIVE != 0 {
+            self.status |= CARRY; // Set CARRY flag
         } else {
-            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= !CARRY; // Clear CARRY flag
             self.status &= 0b1111_1110;
         }
     }
@@ -317,26 +316,26 @@ pub fn lsr(&mut self, addr: u16) {
         let result = value >> 1;
         self.write(addr, result);
         self.update_zero_and_negative_flags(result);
-        if value & 0b0000_0001 != 0 {
-            self.status |= 0b0000_0001;
+        if value & CARRY != 0 {
+            self.status |= CARRY;
         } else {
-            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= !CARRY; // Clear CARRY flag
             self.status &= 0b1111_1110;
         }
     }
 
 // Rotate left
-// The CARRY flag is shifted into bit 0 and bit 7 is shifted into the 0b0000_0001 flag
+// The CARRY flag is shifted into bit 0 and bit 7 is shifted into the CARRY flag
 pub fn rol(&mut self, addr: u16) {
         let value = self.read(addr);
-        let carry = self.status & 0b0000_0001;
-        let result = (value << 1) | 0b0000_0001;
+        let carry = self.status & CARRY;
+        let result = (value << 1) | CARRY;
         self.write(addr, result);
         self.update_zero_and_negative_flags(result);
-        if value & 0b1000_0000 != 0 {
-            self.status |= 0b0000_0001;
+        if value & NEGATIVE != 0 {
+            self.status |= CARRY;
         } else {
-            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= !CARRY; // Clear CARRY flag
             self.status &= 0b1111_1110;
         }
     }
@@ -345,14 +344,14 @@ pub fn rol(&mut self, addr: u16) {
 // The CARRY flag is shifted into bit 7 and bit 0 is shifted into the CARRY flag
 pub fn ror(&mut self, addr: u16) {
         let value = self.read(addr);
-        let carry = self.status & 0b0000_0001;
-        let result = (value >> 1) | (0b0000_0001 << 7);
+        let carry = self.status & CARRY;
+        let result = (value >> 1) | (CARRY << 7);
         self.write(addr, result);
         self.update_zero_and_negative_flags(result);
-        if value & 0b0000_0001 != 0 {
-            self.status |= 0b0000_0001;
+        if value & CARRY != 0 {
+            self.status |= CARRY;
         } else {
-            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= !CARRY; // Clear CARRY flag
             self.status &= 0b1111_1110;
         }
     }
@@ -363,41 +362,43 @@ impl Cpu6502 {
 // Flag operations
 // Clear CARRY flag
 pub fn clc(&mut self) {
-        self.status &= !0b0000_0001;
+        self.status &= !CARRY;
         self.status &= 0b1111_1110;
     }
 
-// Clear decimal mode
+/* Clear DECIMAL_MODE flag 
 pub fn cld(&mut self) {
-        self.status &= !0b0000_1000;
+        self.status &= !DECIMAL_MODE;
         self.status &= 0b1111_0111;
     }
+*/
 
-// Clear interrupt disable
+// Clear INTERRUPT_DISABLE flag 
 pub fn cli(&mut self) {
-        self.status &= !0b0000_0100;
+        self.status &= !INTERRUPT_DISABLE;
         self.status &= 0b1111_1011;
     }
 
-// Clear overflow flag
+// Clear OVERFLOW flag
 pub fn clv(&mut self) {
-        self.status &= !0b0100_0000;
+        self.status &= !OVERFLOW;
         self.status &= 0b1011_1111;
     }
 
-// Set CARRY flag
+// Set CARRY flag to enable the CARRY
 pub fn sec(&mut self) {
-        self.status |= 0b0000_0001;
+        self.status |= CARRY;
     }
 
-// Set decimal mode
+/* Set DECIMAL_MODE flag to enter BCD
 pub fn sed(&mut self) {
-        self.status |= 0b0000_1000;
+        self.status |= DECIMAL_MODE;
     }
+*/
 
-// Set interrupt disable
+// Set INTERRUPT_DISABLE flag to disable the maskable interrupt lin
 pub fn sei(&mut self) {
-        self.status |= 0b0000_0100;
+        self.status |= INTERRUPT_DISABLE;
     }
 }
 
@@ -407,9 +408,9 @@ impl Cpu6502 {
 // Compare the accumulator with a value
 pub fn cmp(&mut self, value: u8) {
         if self.a >= value {
-            self.status |= 0b0000_0001; // Set CARRY flag
+            self.status |= CARRY; // Set CARRY flag
         } else {
-            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= !CARRY; // Clear CARRY flag
             self.status &= 0b1111_1110;
         }
         let result = self.a.wrapping_sub(value);
@@ -419,9 +420,9 @@ pub fn cmp(&mut self, value: u8) {
 // Compare the X register with a value
 pub fn cpx(&mut self, value: u8) {
         if self.x >= value {
-            self.status |= 0b0000_0001; // Set CARRY flag
+            self.status |= CARRY; // Set CARRY flag
         } else {
-            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= !CARRY; // Clear CARRY flag
             self.status &= 0b1111_1110;
         }
         let result = self.x.wrapping_sub(value);
@@ -431,9 +432,9 @@ pub fn cpx(&mut self, value: u8) {
 // Compare the Y register with a value
 pub fn cpy(&mut self, value: u8) {
         if self.y >= value {
-            self.status |= 0b0000_0001; // Set CARRY flag
+            self.status |= CARRY; // Set CARRY flag
         } else {
-            self.status &= !0b0000_0001; // Clear CARRY flag
+            self.status &= !CARRY; // Clear CARRY flag
             self.status &= 0b1111_1110;
         }
         let result = self.y.wrapping_sub(value);
@@ -450,49 +451,49 @@ pub fn branch(&mut self, offset: u8) {
     }
 
 pub fn bcc(&mut self, offset: u8) {
-        if self.status & 0b0000_0001 == 0 {
+        if self.status & CARRY == 0 {
             self.branch(offset);
         }
     }
 
 pub fn bcs(&mut self, offset: u8) {
-        if self.status & 0b0000_0001 != 0 {
+        if self.status & CARRY != 0 {
             self.branch(offset);
         }
     }
 
 pub fn beq(&mut self, offset: u8) {
-        if self.status & 0b0000_0010 != 0 {
+        if self.status & ZERO != 0 {
             self.branch(offset);
         }
     }
 
 pub fn bmi(&mut self, offset: u8) {
-        if self.status & 0b1000_0000 != 0 {
+        if self.status & NEGATIVE != 0 {
             self.branch(offset);
         }
     }
 
 pub fn bne(&mut self, offset: u8) {
-        if self.status & 0b0000_0010 == 0 {
+        if self.status & ZERO == 0 {
             self.branch(offset);
         }
     }
 
 pub fn bpl(&mut self, offset: u8) {
-        if self.status & 0b1000_0000 == 0 {
+        if self.status & NEGATIVE == 0 {
             self.branch(offset);
         }
     }
 
 pub fn bvc(&mut self, offset: u8) {
-        if self.status & 0b0100_0000 == 0 {
+        if self.status & OVERFLOW == 0 {
             self.branch(offset);
         }
     }
 
 pub fn bvs(&mut self, offset: u8) {
-        if self.status & 0b0100_0000 != 0 {
+        if self.status & OVERFLOW != 0 {
             self.branch(offset);
         }
     }
@@ -551,21 +552,21 @@ impl Cpu6502 {
 // These instructions perform bitwise operations on the accumulator and memory
 pub fn bit(&mut self, value: u8) {
         if self.a & value == 0 {
-            self.status |= 0b0000_0010; // Set zero flag
+            self.status |= ZERO; // Set zero flag
         } else {
-            self.status &= !0b0000_0010; // Clear zero flag
+            self.status &= !ZERO; // Clear zero flag
             self.status &= 0b1111_1101;
         }
-        if value & 0b1000_0000 != 0 {
-            self.status |= 0b1000_0000; // Set negative flag
+        if value & NEGATIVE != 0 {
+            self.status |= NEGATIVE; // Set negative flag
         } else {
-            self.status &= !0b1000_0000; // Clear negative flag
+            self.status &= !NEGATIVE; // Clear negative flag
             self.status &= 0b0111_1111;
         }
-        if value & 0b0100_0000 != 0 {
-            self.status |= 0b0100_0000; // Set overflow flag
+        if value & OVERFLOW != 0 {
+            self.status |= OVERFLOW; // Set overflow flag
         } else {
-            self.status &= !0b0100_0000; // Clear overflow flag
+            self.status &= !OVERFLOW; // Clear overflow flag
             self.status &= 0b1011_1111;
         }
     }
