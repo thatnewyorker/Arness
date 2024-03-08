@@ -1,4 +1,4 @@
-# Arness: NES Emulator in Rust
+# (WIP) Arness: NES Emulator in Rust
 
 Welcome to Arness, a high-performance Nintendo Entertainment System (NES) emulator written in Rust. Arness aims to provide an accurate and enjoyable emulation experience, focusing on compatibility, performance, and user-friendly features.
 
