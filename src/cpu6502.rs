@@ -1,3 +1,6 @@
+mod ppu; // Import the PPU module
+use ppu::Ppu;
+
 // Define the status flags
 const CARRY: u8 = 0b0000_0001;
 const ZERO: u8 = 0b0000_0010;
@@ -13,6 +16,7 @@ pub struct Cpu6502 {
     pub pc: u16,
     pub status: u8,
     pub memory: [u8; 65536],
+    pub ppu: Ppu, // PPU instance
 }
 
 impl Cpu6502 {
@@ -25,6 +29,7 @@ impl Cpu6502 {
             pc: 0x8000,
             status: 0x24,
             memory: [0; 65536],
+            ppu: Ppu::new(),
         }
     }
 
@@ -209,11 +214,17 @@ impl Cpu6502 {
 
     // Memory access
     pub fn read(&self, addr: u16) -> u8 {
-        *self.memory.get(addr as usize).unwrap_or(&0)
+        match addr {
+            0x2000..=0x2007 => self.ppu.read(addr),
+            _ => *self.memory.get(addr as usize).unwrap_or(&0),
+        }
     }
 
     pub fn write(&mut self, addr: u16, data: u8) {
-        self.memory[addr as usize] = data;
+        match addr {
+            0x2000..=0x2007 => self.ppu.write(addr, data),
+            _ => self.memory[addr as usize] = data,
+        }
     }
 
     pub fn read_word(&self, addr: u16) -> u16 {
@@ -565,6 +576,7 @@ impl Cpu6502 {
             0xEA => self.nop(),
             _ => println!("Unimplemented opcode: {:#04x} at PC: {:#06x}", opcode, self.pc - 1),
         }
+        self.ppu.step(1);
     }
 
     pub fn run(&mut self, cycles: usize) {
@@ -579,18 +591,4 @@ impl Cpu6502 {
         }
         self.pc = start_addr;
     }
-}
-
-fn main() {
-    let mut cpu = Cpu6502::new();
-    let program = [
-        0xA9, 0x05, // LDA #$05
-        0x69, 0x03, // ADC #$03
-        0x8D, 0x00, 0x02, // STA $0200
-        0x00,       // BRK
-    ];
-    cpu.load_program(&program, 0x8000);
-    println!("Before: A={:#04x}, Status={:#04x}", cpu.a, cpu.status);
-    cpu.run(4);
-    println!("After: A={:#04x}, Status={:#04x}, Mem[0x0200]={:#04x}", cpu.a, cpu.status, cpu.read(0x0200));
 }
