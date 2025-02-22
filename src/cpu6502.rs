@@ -1,5 +1,4 @@
-mod ppu; // Import the PPU module
-use ppu::Ppu;
+use crate::ppu::Ppu;
 
 // Define the status flags
 const CARRY: u8 = 0b0000_0001;
@@ -16,7 +15,7 @@ pub struct Cpu6502 {
     pub pc: u16,
     pub status: u8,
     pub memory: [u8; 65536],
-    pub ppu: Ppu, // PPU instance
+    pub ppu: Ppu,
 }
 
 impl Cpu6502 {
@@ -213,7 +212,7 @@ impl Cpu6502 {
     }
 
     // Memory access
-    pub fn read(&self, addr: u16) -> u8 {
+    pub fn read(&mut self, addr: u16) -> u8 {
         match addr {
             0x2000..=0x2007 => self.ppu.read(addr),
             _ => *self.memory.get(addr as usize).unwrap_or(&0),
@@ -227,7 +226,7 @@ impl Cpu6502 {
         }
     }
 
-    pub fn read_word(&self, addr: u16) -> u16 {
+    pub fn read_word(&mut self, addr: u16) -> u16 {
         let lo = self.read(addr) as u16;
         let hi = self.read(addr + 1) as u16;
         (hi << 8) | lo
