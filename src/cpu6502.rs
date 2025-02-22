@@ -5,21 +5,16 @@ const INTERRUPT_DISABLE: u8 = 0b0000_0100;
 const OVERFLOW: u8 = 0b0100_0000;
 const NEGATIVE: u8 = 0b1000_0000;
 
-// Define the CPU module and its implementation
 pub struct Cpu6502 {
-    // Registers
     pub a: u8,
     pub x: u8,
     pub y: u8,
     pub sp: u8,
     pub pc: u16,
     pub status: u8,
-
-    // Memory (64KB)
     pub memory: [u8; 65536],
 }
 
-// Implementation of the CPU
 impl Cpu6502 {
     pub fn new() -> Self {
         Cpu6502 {
@@ -33,22 +28,18 @@ impl Cpu6502 {
         }
     }
 
-    // Set a status flag
     fn set_status_flag(&mut self, flag: u8) {
         self.status |= flag;
     }
 
-    // Clear a status flag
     fn clear_status_flag(&mut self, flag: u8) {
         self.status &= flag ^ 0xFF;
     }
 
-    // Check if a status flag is set
     fn is_status_flag_set(&self, flag: u8) -> bool {
         self.status & flag != 0
     }
 
-    // Update the zero and negative flags based on the result
     fn update_zero_and_negative_flags(&mut self, result: u8) {
         if result == 0 {
             self.set_status_flag(ZERO);
@@ -490,7 +481,7 @@ impl Cpu6502 {
     }
 
     pub fn rti(&mut self) {
-        self.plp(); // Changed to plp() to correctly restore status
+        self.plp();
         self.pc = self.pop_word();
     }
 
@@ -529,42 +520,50 @@ impl Cpu6502 {
         }
     }
 
-    // No operation
     pub fn nop(&mut self) {
         // Do nothing
     }
 
-    // Execution logic
     pub fn step(&mut self) {
         let opcode = self.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
-
         match opcode {
-            // LDA
-            0xA9 => self.lda_immediate(self.immediate()), // Immediate
-            0xAD => self.lda_absolute(self.absolute()),   // Absolute
-            0xA5 => self.lda_zero_page(self.zero_page()), // Zero Page
-
-            // ADC
-            0x69 => self.adc(self.immediate()),           // Immediate
-            0x6D => self.adc(self.read(self.absolute())), // Absolute
-
-            // STA
-            0x8D => self.sta(self.absolute()), // Absolute
-            0x85 => self.sta(self.zero_page()), // Zero Page
-
-            // JMP
-            0x4C => self.jmp(self.absolute()), // Absolute
-
-            // BRK
-            0x00 => self.brk(),
-
-            // NOP
-            0xEA => self.nop(),
-
-            _ => {
-                println!("Unimplemented opcode: {:#04x} at PC: {:#06x}", opcode, self.pc - 1);
+            0xA9 => {
+                let value = self.immediate();
+                self.lda_immediate(value);
             }
+            0xAD => {
+                let addr = self.absolute();
+                self.lda_absolute(addr);
+            }
+            0xA5 => {
+                let addr = self.zero_page();
+                self.lda_zero_page(addr);
+            }
+            0x69 => {
+                let value = self.immediate();
+                self.adc(value);
+            }
+            0x6D => {
+                let addr = self.absolute();
+                let value = self.read(addr);
+                self.adc(value);
+            }
+            0x8D => {
+                let addr = self.absolute();
+                self.sta(addr);
+            }
+            0x85 => {
+                let addr = self.zero_page();
+                self.sta(addr);
+            }
+            0x4C => {
+                let addr = self.absolute();
+                self.jmp(addr);
+            }
+            0x00 => self.brk(),
+            0xEA => self.nop(),
+            _ => println!("Unimplemented opcode: {:#04x} at PC: {:#06x}", opcode, self.pc - 1),
         }
     }
 
@@ -584,8 +583,6 @@ impl Cpu6502 {
 
 fn main() {
     let mut cpu = Cpu6502::new();
-
-    // Test program: LDA #$05, ADC #$03, STA $0200, BRK
     let program = [
         0xA9, 0x05, // LDA #$05
         0x69, 0x03, // ADC #$03
@@ -593,8 +590,7 @@ fn main() {
         0x00,       // BRK
     ];
     cpu.load_program(&program, 0x8000);
-
     println!("Before: A={:#04x}, Status={:#04x}", cpu.a, cpu.status);
-    cpu.run(4); // Execute 4 instructions
+    cpu.run(4);
     println!("After: A={:#04x}, Status={:#04x}, Mem[0x0200]={:#04x}", cpu.a, cpu.status, cpu.read(0x0200));
 }
