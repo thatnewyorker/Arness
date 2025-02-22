@@ -55,8 +55,6 @@ impl Cpu6502 {
         } else {
             self.clear_status_flag(ZERO);
         }
-
-        // Set or clear the negative flag by checking the most significant bit of the result
         if result & NEGATIVE != 0 {
             self.set_status_flag(NEGATIVE);
         } else {
@@ -64,105 +62,144 @@ impl Cpu6502 {
         }
     }
 
-    // Load the accumulator with a value
+    // Addressing modes
+    fn immediate(&mut self) -> u8 {
+        let value = self.read(self.pc);
+        self.pc = self.pc.wrapping_add(1);
+        value
+    }
+
+    fn absolute(&mut self) -> u16 {
+        let addr = self.read_word(self.pc);
+        self.pc = self.pc.wrapping_add(2);
+        addr
+    }
+
+    fn zero_page(&mut self) -> u16 {
+        let addr = self.read(self.pc) as u16;
+        self.pc = self.pc.wrapping_add(1);
+        addr
+    }
+
+    // Load instructions
     pub fn lda_immediate(&mut self, value: u8) {
         self.a = value;
         self.update_zero_and_negative_flags(self.a);
     }
 
-    // Load the X register with a value
+    fn lda_absolute(&mut self, addr: u16) {
+        self.a = self.read(addr);
+        self.update_zero_and_negative_flags(self.a);
+    }
+
+    fn lda_zero_page(&mut self, addr: u16) {
+        self.a = self.read(addr);
+        self.update_zero_and_negative_flags(self.a);
+    }
+
     pub fn ldx_immediate(&mut self, value: u8) {
         self.x = value;
         self.update_zero_and_negative_flags(self.x);
     }
 
-    // Load the Y register with a value
     pub fn ldy_immediate(&mut self, value: u8) {
         self.y = value;
         self.update_zero_and_negative_flags(self.y);
     }
 
-    // Store the accumulator in memory
+    // Store instructions
     pub fn sta(&mut self, addr: u16) {
         self.write(addr, self.a);
     }
 
-    // Store the X register in memory
     pub fn stx(&mut self, addr: u16) {
         self.write(addr, self.x);
     }
 
-    // Store the Y register in memory
     pub fn sty(&mut self, addr: u16) {
         self.write(addr, self.y);
     }
 
-    // Transfer the accumulator to the X register
+    // Transfer instructions
     pub fn tax(&mut self) {
         self.x = self.a;
         self.update_zero_and_negative_flags(self.x);
     }
 
-    // Transfer the accumulator to the Y register
     pub fn tay(&mut self) {
         self.y = self.a;
         self.update_zero_and_negative_flags(self.y);
     }
 
-    // Transfer the X register to the accumulator
     pub fn txa(&mut self) {
         self.a = self.x;
         self.update_zero_and_negative_flags(self.a);
     }
 
-    // Transfer the Y register to the accumulator
     pub fn tya(&mut self) {
         self.a = self.y;
         self.update_zero_and_negative_flags(self.a);
     }
 
-    // Transfer the stack pointer to the X register
     pub fn tsx(&mut self) {
         self.x = self.sp;
         self.update_zero_and_negative_flags(self.x);
     }
 
-    // Transfer the X register to the stack pointer
     pub fn txs(&mut self) {
         self.sp = self.x;
     }
 
     // Arithmetic instructions
-    // Add with CARRY
     pub fn adc(&mut self, value: u8) {
-        let result = self.a as u16 + value as u16 + (self.status & CARRY) as u16;
+        let a = self.a as u16;
+        let v = value as u16;
+        let c = (self.status & CARRY) as u16;
+        let result = a + v + c;
+
         self.clear_status_flag(CARRY);
         if result > 0xFF {
             self.set_status_flag(CARRY);
         }
+
+        let overflow = ((a ^ result) & (v ^ result) & 0x80) != 0;
+        if overflow {
+            self.set_status_flag(OVERFLOW);
+        } else {
+            self.clear_status_flag(OVERFLOW);
+        }
+
         self.a = result as u8;
         self.update_zero_and_negative_flags(self.a);
     }
 
-    // Subtract with CARRY
     pub fn sbc(&mut self, value: u8) {
-        let value = value ^ 0xFF;
-        let result = self.a as u16 + value as u16 + (self.status & CARRY) as u16;
+        let a = self.a as u16;
+        let v = value as u16;
+        let c = (self.status & CARRY) as u16;
+        let result = a.wrapping_sub(v).wrapping_sub(1 - c);
+
         self.clear_status_flag(CARRY);
-        if result > 0xFF {
+        if result <= 0xFF {
             self.set_status_flag(CARRY);
         }
+
+        let overflow = ((a ^ v) & (a ^ result) & 0x80) != 0;
+        if overflow {
+            self.set_status_flag(OVERFLOW);
+        } else {
+            self.clear_status_flag(OVERFLOW);
+        }
+
         self.a = result as u8;
         self.update_zero_and_negative_flags(self.a);
     }
 
-    // Stack Instructions
-    // Push a byte to the stack
+    // Stack instructions
     pub fn pha(&mut self) {
         self.push(self.a);
     }
 
-    //
     pub fn pla(&mut self) {
         self.a = self.pop();
         self.update_zero_and_negative_flags(self.a);
@@ -170,36 +207,30 @@ impl Cpu6502 {
 
     pub fn php(&mut self) {
         let status_with_b_and_u_flags = self.status | 0b0011_0000;
-        // bit 4 and 5 set
         self.push(status_with_b_and_u_flags);
     }
 
-    // Pull the status register from the stack
     pub fn plp(&mut self) {
         let pulled_status = self.pop();
         let unused_flag_mask = !0b0010_0000;
         self.status = (self.status & unused_flag_mask) | (pulled_status & !unused_flag_mask);
     }
 
-    // These functions are used to read and write to memory
-    //  Read a byte from memory
+    // Memory access
     pub fn read(&self, addr: u16) -> u8 {
         *self.memory.get(addr as usize).unwrap_or(&0)
     }
 
-    // Write a byte to memory
     pub fn write(&mut self, addr: u16, data: u8) {
         self.memory[addr as usize] = data;
     }
 
-    // Read a 16-bit word from memory
     pub fn read_word(&self, addr: u16) -> u16 {
         let lo = self.read(addr) as u16;
         let hi = self.read(addr + 1) as u16;
         (hi << 8) | lo
     }
 
-    // Write a 16-bit word to memory
     pub fn write_word(&mut self, addr: u16, data: u16) {
         let lo = data as u8;
         let hi = (data >> 8) as u8;
@@ -207,37 +238,29 @@ impl Cpu6502 {
         self.write(addr + 1, hi);
     }
 
-    // Stack operations (the stack is located at 0x0100-0x01FF)
+    // Stack operations
     pub fn push(&mut self, data: u8) {
         self.write(0x0100 + self.sp as u16, data);
         self.sp = self.sp.wrapping_sub(1);
     }
 
-    // Pop a byte from the stack
     pub fn pop(&mut self) -> u8 {
         self.sp = self.sp.wrapping_add(1);
         self.read(0x0100 + self.sp as u16)
     }
 
-    // Push a 16-bit word to the stack
     pub fn push_word(&mut self, data: u16) {
         self.push((data >> 8) as u8);
         self.push(data as u8);
     }
 
-    // Pop a 16-bit word from the stack
     pub fn pop_word(&mut self) -> u16 {
         let lo = self.pop() as u16;
         let hi = self.pop() as u16;
         (hi << 8) | lo
     }
 
-    // Status register operations
-    pub fn pull_status(&mut self) {
-        self.status = self.pop();
-    }
-
-    // Increment and Decrement
+    // Increment and decrement
     pub fn dec(&mut self, addr: u16) {
         let value = self.read(addr).wrapping_sub(1);
         self.write(addr, value);
@@ -286,8 +309,7 @@ impl Cpu6502 {
         self.update_zero_and_negative_flags(self.a);
     }
 
-    // Shifts and Rotates
-    // Arithmetic shift left
+    // Shifts and rotates
     pub fn asl(&mut self, addr: u16) {
         let value = self.read(addr);
         let result = value << 1;
@@ -300,7 +322,6 @@ impl Cpu6502 {
         }
     }
 
-    // Logical shift right
     pub fn lsr(&mut self, addr: u16) {
         let value = self.read(addr);
         let result = value >> 1;
@@ -313,8 +334,6 @@ impl Cpu6502 {
         }
     }
 
-    // Rotate left
-    // The CARRY flag is shifted into bit 0 and bit 7 is shifted into the CARRY flag
     pub fn rol(&mut self, addr: u16) {
         let value = self.read(addr);
         let carry = self.status & CARRY;
@@ -328,8 +347,6 @@ impl Cpu6502 {
         }
     }
 
-    // Rotate right
-    // The CARRY flag is shifted into bit 7 and bit 0 is shifted into the CARRY flag
     pub fn ror(&mut self, addr: u16) {
         let value = self.read(addr);
         let carry = self.status & CARRY;
@@ -344,33 +361,27 @@ impl Cpu6502 {
     }
 
     // Flag operations
-    // Clear CARRY flag
     pub fn clc(&mut self) {
         self.clear_status_flag(CARRY);
     }
 
-    // Clear INTERRUPT_DISABLE flag
     pub fn cli(&mut self) {
         self.clear_status_flag(INTERRUPT_DISABLE);
     }
 
-    // Clear OVERFLOW flag
     pub fn clv(&mut self) {
         self.clear_status_flag(OVERFLOW);
     }
 
-    // Set CARRY flag to enable the CARRY
     pub fn sec(&mut self) {
         self.set_status_flag(CARRY);
     }
 
-    // Set INTERRUPT_DISABLE flag to disable the maskable interrupt lin
     pub fn sei(&mut self) {
-        self.status |= INTERRUPT_DISABLE;
+        self.set_status_flag(INTERRUPT_DISABLE);
     }
 
     // Comparison instructions
-    // Compare the accumulator with a value
     pub fn cmp(&mut self, value: u8) {
         if self.a >= value {
             self.set_status_flag(CARRY);
@@ -381,7 +392,6 @@ impl Cpu6502 {
         self.update_zero_and_negative_flags(result);
     }
 
-    // Compare the X register with a value
     pub fn cpx(&mut self, value: u8) {
         if self.x >= value {
             self.set_status_flag(CARRY);
@@ -392,7 +402,6 @@ impl Cpu6502 {
         self.update_zero_and_negative_flags(result);
     }
 
-    // Compare the Y register with a value
     pub fn cpy(&mut self, value: u8) {
         if self.y >= value {
             self.set_status_flag(CARRY);
@@ -406,78 +415,68 @@ impl Cpu6502 {
     // Branches
     pub fn branch(&mut self, offset: u8) {
         let offset = offset as i8 as i16;
-        self.pc = self.pc.wrapping_add(offset as u16)
+        self.pc = self.pc.wrapping_add(offset as u16);
     }
 
-    // Branch on carry clear
     pub fn bcc(&mut self, offset: u8) {
         if self.status & CARRY == 0 {
             self.branch(offset);
         }
     }
 
-    // Branch on carry set
     pub fn bcs(&mut self, offset: u8) {
         if self.status & CARRY != 0 {
             self.branch(offset);
         }
     }
 
-    // Branch on equal
     pub fn beq(&mut self, offset: u8) {
         if self.status & ZERO != 0 {
             self.branch(offset);
         }
     }
 
-    // Branch on minus
     pub fn bmi(&mut self, offset: u8) {
         if self.status & NEGATIVE != 0 {
             self.branch(offset);
         }
     }
 
-    // Branch on not equal
     pub fn bne(&mut self, offset: u8) {
         if self.status & ZERO == 0 {
             self.branch(offset);
         }
     }
 
-    // Branch on plus
     pub fn bpl(&mut self, offset: u8) {
         if self.status & NEGATIVE == 0 {
             self.branch(offset);
         }
     }
 
-    // Branch on overflow clear
     pub fn bvc(&mut self, offset: u8) {
         if self.status & OVERFLOW == 0 {
             self.branch(offset);
         }
     }
 
-    // Branch on overflow set
     pub fn bvs(&mut self, offset: u8) {
         if self.status & OVERFLOW != 0 {
             self.branch(offset);
         }
     }
 
-    // Jumps and Subroutines
+    // Jumps and subroutines
     pub fn jmp(&mut self, addr: u16) {
         self.pc = addr;
     }
 
-    // Jump to subroutine
     pub fn jsr(&mut self, addr: u16) {
         let return_addr = self.pc - 1;
         self.push_word(return_addr);
         self.pc = addr;
     }
 
-    // Return from subroutine
     pub fn rts(&mut self) {
         self.pc = self.pop_word() + 1;
     }
@@ -487,16 +486,14 @@ impl Cpu6502 {
         self.push_word(self.pc);
         self.php();
         self.sei();
-        self.pc = self.read_word(0xFFFE)
+        self.pc = self.read_word(0xFFFE);
     }
 
-    // Return from interrupt
     pub fn rti(&mut self) {
-        self.pull_status();
+        self.plp(); // Changed to plp() to correctly restore status
         self.pc = self.pop_word();
     }
 
-    // Non-Maskable Interrupt
     pub fn nmi(&mut self) {
         self.push_word(self.pc);
         self.php();
@@ -504,16 +501,16 @@ impl Cpu6502 {
         self.pc = self.read_word(0xFFFA);
     }
 
-    // Interrupt Request
     pub fn irq(&mut self) {
-        self.push_word(self.pc);
-        self.php();
-        self.sei();
-        self.pc = self.read_word(0xFFFE);
+        if !self.is_status_flag_set(INTERRUPT_DISABLE) {
+            self.push_word(self.pc);
+            self.php();
+            self.sei();
+            self.pc = self.read_word(0xFFFE);
+        }
     }
 
-    // These instructions perform bitwise operations on the accumulator and memory
-    // AND memory with accumulator
+    // Bit test
     pub fn bit(&mut self, value: u8) {
         if self.a & value == 0 {
             self.set_status_flag(ZERO);
@@ -531,8 +528,73 @@ impl Cpu6502 {
             self.clear_status_flag(OVERFLOW);
         }
     }
+
     // No operation
     pub fn nop(&mut self) {
         // Do nothing
     }
+
+    // Execution logic
+    pub fn step(&mut self) {
+        let opcode = self.read(self.pc);
+        self.pc = self.pc.wrapping_add(1);
+
+        match opcode {
+            // LDA
+            0xA9 => self.lda_immediate(self.immediate()), // Immediate
+            0xAD => self.lda_absolute(self.absolute()),   // Absolute
+            0xA5 => self.lda_zero_page(self.zero_page()), // Zero Page
+
+            // ADC
+            0x69 => self.adc(self.immediate()),           // Immediate
+            0x6D => self.adc(self.read(self.absolute())), // Absolute
+
+            // STA
+            0x8D => self.sta(self.absolute()), // Absolute
+            0x85 => self.sta(self.zero_page()), // Zero Page
+
+            // JMP
+            0x4C => self.jmp(self.absolute()), // Absolute
+
+            // BRK
+            0x00 => self.brk(),
+
+            // NOP
+            0xEA => self.nop(),
+
+            _ => {
+                println!("Unimplemented opcode: {:#04x} at PC: {:#06x}", opcode, self.pc - 1);
+            }
+        }
+    }
+
+    pub fn run(&mut self, cycles: usize) {
+        for _ in 0..cycles {
+            self.step();
+        }
+    }
+
+    pub fn load_program(&mut self, program: &[u8], start_addr: u16) {
+        for (i, &byte) in program.iter().enumerate() {
+            self.write(start_addr + i as u16, byte);
+        }
+        self.pc = start_addr;
+    }
+}
+
+fn main() {
+    let mut cpu = Cpu6502::new();
+
+    // Test program: LDA #$05, ADC #$03, STA $0200, BRK
+    let program = [
+        0xA9, 0x05, // LDA #$05
+        0x69, 0x03, // ADC #$03
+        0x8D, 0x00, 0x02, // STA $0200
+        0x00,       // BRK
+    ];
+    cpu.load_program(&program, 0x8000);
+
+    println!("Before: A={:#04x}, Status={:#04x}", cpu.a, cpu.status);
+    cpu.run(4); // Execute 4 instructions
+    println!("After: A={:#04x}, Status={:#04x}, Mem[0x0200]={:#04x}", cpu.a, cpu.status, cpu.read(0x0200));
 }
