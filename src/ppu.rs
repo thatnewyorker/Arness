@@ -71,23 +71,24 @@ impl Ppu {
         }
     }
 
-    pub fn read(&mut self, addr: u16) -> u8 {
-        match addr {
-            0x2002 => {
-                let value = self.status;
-                self.status &= !0x80;
-                self.addr_latch = false;
-                value
-            }
-            0x2007 => {
-                let value = self.data_buffer;
-                self.data_buffer = self.read_vram(self.addr);
-                self.addr += if self.ctrl & 0x04 != 0 { 32 } else { 1 };
-                value
-            }
-            _ => 0,
+pub fn read(&mut self, addr: u16) -> u8 {
+    match addr & 0x2007 { // Mask to handle mirroring in CPU, but shown here for clarity
+        0x2002 => {
+            let value = self.status;
+            self.status &= !0x80; // Clear VBLANK on read
+            self.addr_latch = false;
+            value
         }
+        0x2007 => {
+            let value = self.data_buffer;
+            let new_data = self.read_vram(self.addr);
+            self.data_buffer = if self.addr < 0x3F00 { new_data } else { value }; // Palette reads are immediate
+            self.addr += if self.ctrl & 0x04 != 0 { 32 } else { 1 };
+            value
+        }
+        _ => 0,
     }
+}
 
     pub fn write(&mut self, addr: u16, value: u8) {
         match addr {
