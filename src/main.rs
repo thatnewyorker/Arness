@@ -4,10 +4,22 @@ mod rom;
 use cpu6502::Cpu6502;
 use rom::Rom;
 use minifb::{Key, Window, WindowOptions};
+use std::env;
 
 fn main() {
-    // Load ROM
-    let rom = Rom::load_from_file("/home/gerard/ROMs/NES/Donkey_Kong/dk.nes").expect("Failed to load ROM");
+    // Get the ROM path from command-line arguments
+    let args: Vec<String> = env::args().collect();
+    let rom_path = match args.len() {
+        2 => &args[1],  // Borrow the ROM path as &String
+        _ => {
+            eprintln!("Usage: {} <path to ROM file>", args[0]);
+            eprintln!("Example: {} /home/gerard/ROMs/NES/Donkey_Kong/dk.nes", args[0]);
+            std::process::exit(1);
+        }
+    };
+
+    // Load ROM (convert &String to &str using as_str())
+    let rom = Rom::load_from_file(rom_path.as_str()).expect("Failed to load ROM");
     println!("ROM loaded: PRG size = {}, CHR size = {}, Mapper = {}", 
              rom.prg_size(), rom.chr_size(), rom.mapper());  // Use method calls
 
@@ -43,9 +55,9 @@ fn main() {
     window.set_target_fps(60);
 
     // Main loop with debug prints
-    let mut frame_count = 0;  // Move this inside main, before the while loop
+    let mut frame_count = 0;
     while window.is_open() && !window.is_key_down(Key::Escape) {
-        cpu.run(32000);  // Increase to ensure full NTSC frame (29780.5 cycles)
+        cpu.run(29800);  // Exact NTSC frame (29780.5 rounded up)
         frame_count += 1;
 
         println!("Frame: {}, PC: {:#06x}, A: {:#04x}, X: {:#04x}, Y: {:#04x}, Status: {:#04x}, PPU Ctrl: {:#04x}, Mask: {:#04x}, Scanline: {}, Dot: {}",
