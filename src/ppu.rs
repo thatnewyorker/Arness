@@ -1,409 +1,437 @@
-use crate::rom::Mirroring;
+/*!
+PPU stub exposing register read/write and OAM DMA hook, plus simple timing and NMI signaling.
 
-const SCREEN_WIDTH: usize = 256;
-const SCREEN_HEIGHT: usize = 240;
+Scope:
+- Implements the CPU-visible PPU register interface ($2000..$2007) with basic,
+  but useful, semantics:
+  * $2000 PPUCTRL: stores control flags (incl. VRAM increment and NMI enable)
+  * $2001 PPUMASK: stores mask flags (color emphasis, greyscale, show bg/sprites)
+  * $2002 PPUSTATUS: exposes vblank/sprite flags; read clears vblank and write latch
+  * $2003 OAMADDR: OAM address pointer for $2004
+  * $2004 OAMDATA: read/write OAM at OAMADDR (writes increment OAMADDR)
+  * $2005 PPUSCROLL: two writes form x/y scroll; affects internal write toggle
+  * $2006 PPUADDR: two writes set VRAM address; read of $2002 resets the write toggle
+  * $2007 PPUDATA: VRAM read/write at current VRAM address; auto-increment via $2000
+- Provides a simple VRAM space (0x0000..0x3FFF mirrored) and OAM (256 bytes).
+- Implements buffered reads for $2007 (non-palette addresses return delayed value).
+- Exposes an OAM DMA helper for $4014 handling in the Bus.
+- Adds simple dot/scanline/frame timing and signals NMI on vblank if enabled.
 
-const PALETTE_RGB: [(u8, u8, u8); 64] = [
-    (84, 84, 84), (0, 30, 116), (8, 16, 144), (48, 0, 136), (68, 0, 100), (92, 0, 48), (84, 4, 0), (60, 24, 0),
-    (32, 42, 0), (8, 58, 0), (0, 64, 0), (0, 60, 0), (0, 50, 60), (0, 0, 0), (0, 0, 0), (0, 0, 0),
-    (152, 150, 152), (8, 76, 196), (48, 50, 236), (92, 30, 228), (136, 20, 176), (160, 20, 100), (152, 34, 32), (120, 60, 0),
-    (84, 90, 0), (40, 114, 0), (8, 124, 0), (0, 118, 40), (0, 102, 120), (0, 0, 0), (0, 0, 0), (0, 0, 0),
-    (236, 238, 236), (76, 154, 236), (120, 124, 236), (176, 98, 236), (228, 84, 236), (236, 88, 180), (236, 106, 100), (212, 136, 32),
-    (160, 170, 0), (116, 196, 0), (76, 208, 32), (56, 204, 108), (56, 180, 204), (60, 60, 60), (0, 0, 0), (0, 0, 0),
-    (236, 238, 236), (168, 204, 236), (188, 188, 236), (212, 178, 236), (236, 174, 236), (236, 174, 212), (236, 180, 176), (228, 196, 144),
-    (204, 210, 120), (180, 222, 120), (168, 226, 144), (152, 226, 180), (160, 214, 228), (160, 162, 160), (0, 0, 0), (0, 0, 0),
-];
+Notes:
+- This is still a functional stub, not cycle-accurate. It aims to support CPU-side
+  software interactions and provide a place to evolve full PPU behavior later.
+- Palette mirroring and nametable mirroring are not fully modeled. VRAM is a flat
+  16KB space to keep things simple at this stage.
+*/
 
+#[derive(Clone, Debug)]
 pub struct Ppu {
-    ctrl: u8,
-    mask: u8,
-    status: u8,
-    scroll_x: u8,
-    scroll_y: u8,
-    addr: u16,
-    addr_latch: bool,
-    data_buffer: u8,
-    vram: Vec<u8>,
-    vram_size: usize,
-    pattern_size: usize,
-    nametable_size: usize,
-    is_chr_ram: bool,
-    mirroring: Mirroring,
-    oam: [u8; 256],
-    palette: [u8; 32],
-    cycles: u64,
-    scanline: i32,
-    dot: u32,
-    frame_buffer: [u8; SCREEN_WIDTH * SCREEN_HEIGHT * 3],
-    nmi_triggered: bool,
-    bg_shift_low: u16,
-    bg_shift_high: u16,
-    bg_attr_shift: u8,
-    tile_low: u8,
-    tile_high: u8,
-    attr_latch: u8,
+    // Registers (CPU visible)
+    ctrl: u8,     // $2000 PPUCTRL
+    mask: u8,     // $2001 PPUMASK
+    status: u8,   // $2002 PPUSTATUS (bit7=vblank, bit6=sprite0 hit, bit5=sprite overflow)
+    oam_addr: u8, // $2003 OAMADDR
+
+    // Internal latches and toggles
+    write_toggle: bool, // toggles on $2005/$2006 writes; reset on $2002 read
+    scroll_x: u8,       // first write to $2005
+    scroll_y: u8,       // second write to $2005
+
+    // VRAM addressing
+    vram_addr: u16,     // current VRAM address (15 bits used)
+    vram_buffer: u8,    // read buffer for $2007 (non-palette)
+    vram: [u8; 0x4000], // Simple VRAM stub (0x0000..0x3FFF)
+
+    // OAM (Object Attribute Memory)
+    oam: [u8; 256], // 256 bytes OAM
+
+    // Timing
+    dot: u16,      // 0..=340
+    scanline: i16, // -1 (pre-render), 0..=260; 241..=260 vblank period
+    frame_complete: bool,
+    nmi_latch: bool,
+}
+
+impl Default for Ppu {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Ppu {
-    pub fn new(chr_size: usize, chr_ram_size: usize, mirroring: Mirroring) -> Self {
-        let is_chr_ram = chr_size == 0;
-        let pattern_size = if is_chr_ram { chr_ram_size.max(8 * 1024) } else { chr_size };
-        let nametable_size = if mirroring == Mirroring::FourScreen { 4 * 1024 } else { 2 * 1024 };
-        let vram_size = pattern_size + nametable_size;
-
-        Ppu {
+    pub fn new() -> Self {
+        Self {
             ctrl: 0,
             mask: 0,
             status: 0,
+            oam_addr: 0,
+            write_toggle: false,
             scroll_x: 0,
             scroll_y: 0,
-            addr: 0,
-            addr_latch: false,
-            data_buffer: 0,
-            vram: vec![0; vram_size],
-            vram_size,
-            pattern_size,
-            nametable_size,
-            is_chr_ram,
-            mirroring,
+            vram_addr: 0,
+            vram_buffer: 0,
+            vram: [0; 0x4000],
             oam: [0; 256],
-            palette: [0; 32],
-            cycles: 0,
-            scanline: -1,
             dot: 0,
-            frame_buffer: [0; SCREEN_WIDTH * SCREEN_HEIGHT * 3],
-            nmi_triggered: false,
-            bg_shift_low: 0,
-            bg_shift_high: 0,
-            bg_attr_shift: 0,
-            tile_low: 0,
-            tile_high: 0,
-            attr_latch: 0,
+            scanline: -1,
+            frame_complete: false,
+            nmi_latch: false,
         }
     }
 
-    pub fn load_chr_rom(&mut self, chr_data: &[u8]) -> Result<(), String> {
-        if self.is_chr_ram {
-            return Err("Cannot load CHR-ROM into CHR-RAM".to_string());
-        }
-        if chr_data.len() != self.pattern_size {
-            return Err(format!(
-                "CHR-ROM size {} does not match expected pattern table size {}",
-                chr_data.len(),
-                self.pattern_size
-            ));
-        }
-        for (i, &byte) in chr_data.iter().enumerate() {
-            self.vram[i] = byte;
-        }
-        Ok(())
+    pub fn reset(&mut self) {
+        self.ctrl = 0;
+        self.mask = 0;
+        self.status = 0;
+        self.oam_addr = 0;
+        self.write_toggle = false;
+        self.scroll_x = 0;
+        self.scroll_y = 0;
+        self.vram_addr = 0;
+        self.vram_buffer = 0;
+        self.vram.fill(0);
+        self.oam.fill(0);
+        self.dot = 0;
+        self.scanline = -1;
+        self.frame_complete = false;
+        self.nmi_latch = false;
     }
 
-pub fn step(&mut self, cpu_cycles: usize) -> bool {
-    let ppu_cycles = cpu_cycles * 3;
-    self.cycles += ppu_cycles as u64;
-    let mut nmi = false;
+    // Advance PPU by one dot (called 3x per CPU cycle via Bus.tick).
+    // Signals NMI via Bus at vblank start if enabled.
+    pub fn tick(&mut self) {
+        // On the first dot of specific scanlines, handle state transitions.
+        if self.dot == 0 {
+            // Start of a new dot; when we move to dot 1, check events.
+        }
 
-    println!("PPU Step - Scanline: {}, Dot: {}, Ctrl: {:#04x}, Mask: {:#04x}, Status: {:#04x}",
-             self.scanline, self.dot, self.ctrl, self.mask, self.status);
+        // Increment dot
+        self.dot = self.dot.wrapping_add(1);
 
-    for _ in 0..ppu_cycles {
-        self.dot += 1;
-        if self.dot > 340 {
+        // At dot 1 of a scanline, perform events
+        if self.dot == 1 {
+            if self.scanline == 241 {
+                // Entering vblank
+                self.set_vblank(true);
+                if self.nmi_enabled() {
+                    self.nmi_latch = true;
+                }
+            } else if self.scanline == -1 {
+                // Pre-render line: clear vblank and sprite flags
+                self.set_vblank(false);
+                self.set_sprite_zero_hit(false);
+                self.set_sprite_overflow(false);
+                self.frame_complete = false;
+            }
+        }
+
+        // End of scanline
+        if self.dot >= 341 {
             self.dot = 0;
             self.scanline += 1;
-            println!("Scanline advanced to: {}, Dot reset to: {}", self.scanline, self.dot);
-            if self.scanline > 261 {
+
+            if self.scanline > 260 {
+                // Wrap to pre-render line
                 self.scanline = -1;
-                println!("Scanline wrapped to pre-render: -1");
-            }
-        }
-
-        if self.scanline == 241 && self.dot == 1 {
-            self.status |= 0x80;  // Set VBlank
-            println!("VBlank started - Status: {:#04x}, Scanline: {}, Dot: {}", self.status, self.scanline, self.dot);
-            if self.ctrl & 0x80 != 0 {
-                nmi = true;
-                self.nmi_triggered = true;
-            }
-        }
-
-        if self.scanline == -1 && self.dot == 1 {
-            self.status &= !(0x80 | 0x40 | 0x20);  // Clear VBlank, Sprite 0 Hit, Overflow
-            println!("VBlank cleared - Status: {:#04x}, Scanline: {}, Dot: {}", self.status, self.scanline, self.dot);
-            self.nmi_triggered = false;
-        }
-
-        if self.scanline >= 0 && self.scanline < 240 {
-            if self.dot >= 1 && self.dot <= 256 {
-                if self.mask & 0x08 != 0 {
-                    self.render_background_pixel();
-                    println!("Rendering background at Scanline: {}, Dot: {}, Pixel: {}",
-                             self.scanline, self.dot, (((self.bg_shift_high >> 15) & 0x01) << 1 | ((self.bg_shift_low >> 15) & 0x01)) as u8);
-                }
-            }
-            if self.dot >= 257 && self.dot <= 320 {
-                self.evaluate_sprites();
-            }
-            if self.dot == 256 && self.mask & 0x10 != 0 {
-                self.render_sprites();
-                println!("Rendering sprites at Scanline: {}, Dot: 256", self.scanline);
-            }
-        }
-
-        if self.scanline >= -1 && self.scanline < 240 && self.dot >= 1 && self.dot <= 336 && self.dot % 8 == 0 {
-            self.fetch_background_tile();
-            println!("Fetching background tile at Scanline: {}, Dot: {}, Tile_Low: {:#04x}, Tile_High: {:#04x}, Combined: {:#06x}, Attr: {:#04x}",
-                     self.scanline, self.dot, self.tile_low, self.tile_high, (self.tile_low as u16) | ((self.tile_high as u16) << 8), self.attr_latch);
-        }
-
-        if self.scanline >= 0 && self.scanline < 240 && self.dot >= 1 && self.dot <= 256 {
-            self.bg_shift_low <<= 1;
-            self.bg_shift_high <<= 1;
-            self.bg_attr_shift <<= 1;
-        }
-    }
-    nmi
-}
-
-    fn render_background_pixel(&mut self) {
-        let x = self.dot - 1;
-        let y = self.scanline as usize;
-        let idx = (y * SCREEN_WIDTH + x as usize) * 3;
-
-        let pixel = (((self.bg_shift_high >> 15) & 0x01) << 1 | ((self.bg_shift_low >> 15) & 0x01)) as u8;
-        if pixel != 0 {
-            let palette_idx = ((self.bg_attr_shift >> 7) & 0x03) * 4 + pixel;
-            let color = self.palette[palette_idx as usize] & 0x3F;
-            let (r, g, b) = PALETTE_RGB[color as usize];
-            self.frame_buffer[idx] = r;
-            self.frame_buffer[idx + 1] = g;
-            self.frame_buffer[idx + 2] = b;
-        } else {
-            println!("No pixel rendered at Scanline: {}, Dot: {}, Pixel: {}", self.scanline, self.dot, pixel);
-        }
-    }
-
-    fn fetch_background_tile(&mut self) {
-        let nametable_base = 0x2000 | ((self.ctrl & 0x03) as u16) << 10;
-        let tile_x = (self.dot / 8 + self.scroll_x as u32 / 8) % 32;
-        let tile_y = (self.scanline + self.scroll_y as i32) / 8;
-        let nametable_addr = nametable_base + (tile_y as u16) * 32 + tile_x as u16;
-        let tile_idx = self.read_vram(nametable_addr);
-
-        let attr_x = tile_x / 4;
-        let attr_y = tile_y / 4;
-        let attr_addr = nametable_base + 0x3C0 + (attr_y as u16) * 8 + attr_x as u16;
-        let attr = self.read_vram(attr_addr);
-        let attr_shift = (((tile_y as u32 % 4) / 2 * 2 + (tile_x % 4) / 2) * 2) as u8;
-        let palette_num = (attr >> attr_shift) & 0x03;
-
-        let pattern_base = if self.ctrl & 0x10 != 0 { 0x1000 } else { 0x0000 };
-        let pattern_addr = pattern_base + tile_idx as u16 * 16 + ((self.scanline % 8 + 8) % 8) as u16;
-        self.tile_low = self.read_vram(pattern_addr);
-        self.tile_high = self.read_vram(pattern_addr + 8);
-        self.attr_latch = palette_num;
-
-        self.bg_shift_low = (self.bg_shift_low & 0xFF00) | self.tile_low as u16;
-        self.bg_shift_high = (self.bg_shift_high & 0xFF00) | self.tile_high as u16;
-        self.bg_attr_shift = (self.bg_attr_shift & 0xF0) | (self.attr_latch << 2);
-
-        println!("Fetching background tile at Scanline: {}, Dot: {}, Tile_Low: {:#04x}, Tile_High: {:#04x}, Combined: {:#06x}, Attr: {:#04x}",
-                 self.scanline, self.dot, self.tile_low, self.tile_high, (self.tile_low as u16) | ((self.tile_high as u16) << 8), self.attr_latch);
-    }
-
-    fn evaluate_sprites(&mut self) {
-        if self.scanline >= 0 && self.scanline < 240 {
-            let sprite_y = self.oam[0] as i32;
-            if sprite_y <= self.scanline && self.scanline < sprite_y + 8 {
-                self.status |= 0x40;
+                self.frame_complete = true;
             }
         }
     }
 
-    fn render_sprites(&mut self) {
-        for i in (0..256).step_by(4) {
-            let y = self.oam[i] as i32;
-            let tile = self.oam[i + 1];
-            let attr = self.oam[i + 2];
-            let x = self.oam[i + 3] as u32;
-
-            if y <= self.scanline && self.scanline < y + 8 {
-                let pattern_base = if self.ctrl & 0x08 != 0 { 0x1000 } else { 0x0000 };
-                let pattern_addr = pattern_base + tile as u16 * 16 + (self.scanline - y) as u16;
-                let low = self.read_vram(pattern_addr);
-                let high = self.read_vram(pattern_addr + 8);
-                let palette_num = (attr & 0x03) + 4;
-
-                for bit in 0..8 {
-                    let pixel_x = x + bit;
-                    if pixel_x < 256 {
-                        let pixel = ((high >> (7 - bit)) & 0x01) << 1 | ((low >> (7 - bit)) & 0x01);
-                        if pixel != 0 {
-                            let idx = (self.scanline as usize * SCREEN_WIDTH + pixel_x as usize) * 3;
-                            let color = self.palette[palette_num as usize * 4 + pixel as usize] & 0x3F;
-                            let (r, g, b) = PALETTE_RGB[color as usize];
-                            self.frame_buffer[idx] = r;
-                            self.frame_buffer[idx + 1] = g;
-                            self.frame_buffer[idx + 2] = b;
-                        } else {
-                            println!("No sprite pixel rendered at Scanline: {}, Dot: {}, Pixel_X: {}, Pixel: {}", self.scanline, self.dot, pixel_x, pixel);
-                        }
-                    }
-                }
+    // CPU write to PPU register in $2000..$2007
+    pub fn write_reg(&mut self, addr: u16, value: u8) {
+        let reg = 0x2000 + (addr & 0x0007);
+        match reg {
+            0x2000 => {
+                // PPUCTRL
+                self.ctrl = value;
             }
-        }
-    }
-
-    pub fn read(&mut self, addr: u16) -> u8 {
-        match addr & 0x2007 {
+            0x2001 => {
+                // PPUMASK
+                self.mask = value;
+            }
             0x2002 => {
-                let value = self.status;
-                self.status &= !0x80;
-                self.addr_latch = false;
-                value
+                // PPUSTATUS is read-only; writes are ignored.
             }
-            0x2007 => {
-                let value = self.data_buffer;
-                let new_data = self.read_vram(self.addr);
-                self.data_buffer = if self.addr < 0x3F00 { new_data } else { value };
-                self.addr = self.addr.wrapping_add(if self.ctrl & 0x04 != 0 { 32 } else { 1 }) & 0x3FFF;
-                value
+            0x2003 => {
+                // OAMADDR
+                self.oam_addr = value;
             }
-            _ => 0,
-        }
-    }
-
-    pub fn write(&mut self, addr: u16, value: u8) {
-        match addr & 0x2007 {
-            0x2000 => self.ctrl = value,
-            0x2001 => self.mask = value,
+            0x2004 => {
+                // OAMDATA write; write and increment OAMADDR
+                let idx = self.oam_addr as usize;
+                self.oam[idx] = value;
+                self.oam_addr = self.oam_addr.wrapping_add(1);
+            }
             0x2005 => {
-                if self.addr_latch {
-                    self.scroll_y = value;
-                } else {
+                // PPUSCROLL: two writes
+                if !self.write_toggle {
                     self.scroll_x = value;
+                    self.write_toggle = true;
+                } else {
+                    self.scroll_y = value;
+                    self.write_toggle = false;
                 }
-                self.addr_latch = !self.addr_latch;
             }
             0x2006 => {
-                if self.addr_latch {
-                    self.addr = (self.addr & 0xFF00) | value as u16;
+                // PPUADDR: two writes set VRAM address (15-bit)
+                if !self.write_toggle {
+                    // High byte (only lower 6 bits used on hardware; we mask to 15 bits)
+                    self.vram_addr = (self.vram_addr & 0x00FF) | (((value as u16) & 0x3F) << 8);
+                    self.write_toggle = true;
                 } else {
-                    self.addr = ((value as u16 & 0x3F) << 8) | (self.addr & 0x00FF);
+                    // Low byte
+                    self.vram_addr = (self.vram_addr & 0x7F00) | (value as u16);
+                    self.vram_addr &= 0x3FFF; // mirror to 0x0000..0x3FFF
+                    self.write_toggle = false;
                 }
-                self.addr_latch = !self.addr_latch;
             }
             0x2007 => {
-                self.write_vram(self.addr, value);
-                self.addr = self.addr.wrapping_add(if self.ctrl & 0x04 != 0 { 32 } else { 1 }) & 0x3FFF;
+                // PPUDATA write: write to VRAM, then increment by 1 or 32 depending on $2000 bit 2
+                let addr = (self.vram_addr & 0x3FFF) as usize;
+                self.vram[addr] = value;
+                let inc = if (self.ctrl & 0x04) != 0 { 32 } else { 1 };
+                self.vram_addr = self.vram_addr.wrapping_add(inc) & 0x3FFF;
             }
-            _ => {}
+            _ => { /* unreachable by construction */ }
         }
     }
 
-    pub fn read_vram(&self, addr: u16) -> u8 {
-        let addr = addr & 0x3FFF;
-        if addr as usize >= self.vram_size {
-            return 0;
-        }
-        match addr {
-            0x0000..=0x1FFF => self.vram[addr as usize],
-            0x2000..=0x3EFF => {
-                let nametable_offset = self.pattern_size;
-                let mirrored_addr = addr & 0x0FFF;
-                match self.mirroring {
-                    Mirroring::Horizontal => {
-                        let offset = if mirrored_addr < 0x0800 { mirrored_addr } else { mirrored_addr - 0x0800 };
-                        self.vram[nametable_offset + offset as usize]
-                    }
-                    Mirroring::Vertical => {
-                        let offset = mirrored_addr & 0x07FF;
-                        self.vram[nametable_offset + offset as usize]
-                    }
-                    Mirroring::FourScreen => {
-                        self.vram[nametable_offset + (mirrored_addr & 0x0FFF) as usize]
-                    }
-                }
+    // CPU read from PPU register in $2000..$2007
+    pub fn read_reg(&mut self, addr: u16) -> u8 {
+        let reg = 0x2000 + (addr & 0x0007);
+        match reg {
+            0x2000 => {
+                // PPUCTRL usually not readable; return stored value for visibility.
+                self.ctrl
             }
-            0x3F00..=0x3FFF => {
-                let palette_addr = addr & 0x1F;
-                if palette_addr == 0x10 || palette_addr == 0x14 || palette_addr == 0x18 || palette_addr == 0x1C {
-                    self.palette[(palette_addr & 0x0F) as usize]
+            0x2001 => {
+                // PPUMASK usually not readable; return stored value for visibility.
+                self.mask
+            }
+            0x2002 => {
+                // PPUSTATUS: reading clears vblank flag (bit 7) and resets write toggle
+                let result = self.status;
+                // Clear vblank on read
+                self.status &= !0x80;
+                // Reset $2005/$2006 write toggle
+                self.write_toggle = false;
+                result
+            }
+            0x2003 => {
+                // Return current OAMADDR
+                self.oam_addr
+            }
+            0x2004 => {
+                // OAMDATA read at OAMADDR. On hardware, reads do not increment OAMADDR.
+                let idx = self.oam_addr as usize;
+                self.oam[idx]
+            }
+            0x2005 => {
+                // PPUSCROLL is write-only; return 0 for simplicity.
+                0
+            }
+            0x2006 => {
+                // PPUADDR is write-only; return high byte for visibility.
+                ((self.vram_addr >> 8) & 0xFF) as u8
+            }
+            0x2007 => {
+                // PPUDATA read: buffered read for non-palette addresses
+                let addr = self.vram_addr & 0x3FFF;
+                let value = self.vram[addr as usize];
+
+                let ret = if addr < 0x3F00 {
+                    // Return buffered value and update buffer
+                    let out = self.vram_buffer;
+                    self.vram_buffer = value;
+                    out
                 } else {
-                    self.palette[palette_addr as usize]
-                }
+                    // Palette range returns immediate; buffer updated (simple model)
+                    value
+                };
+
+                let inc = if (self.ctrl & 0x04) != 0 { 32 } else { 1 };
+                self.vram_addr = self.vram_addr.wrapping_add(inc) & 0x3FFF;
+                ret
             }
             _ => 0,
         }
     }
 
-    // Changed from `fn` to `pub fn` to make it public
-    pub fn write_vram(&mut self, addr: u16, value: u8) {
-        let addr = addr & 0x3FFF;
-        if addr as usize >= self.vram_size {
-            return;
+    // Bulk OAM DMA: copies 256 bytes into OAM starting at current OAMADDR, wrapping as needed.
+    // The Bus should call this when $4014 is written.
+    pub fn oam_dma_copy(&mut self, data: &[u8]) {
+        let mut addr = self.oam_addr;
+        for i in 0..256 {
+            let byte = data.get(i).copied().unwrap_or(0);
+            self.oam[addr as usize] = byte;
+            addr = addr.wrapping_add(1);
         }
-        match addr {
-            0x0000..=0x1FFF => {
-                if self.is_chr_ram {
-                    self.vram[addr as usize] = value;
-                }
-            }
-            0x2000..=0x3EFF => {
-                let nametable_offset = self.pattern_size;
-                let mirrored_addr = addr & 0x0FFF;
-                match self.mirroring {
-                    Mirroring::Horizontal => {
-                        let offset = if mirrored_addr < 0x0800 { mirrored_addr } else { mirrored_addr - 0x0800 };
-                        self.vram[nametable_offset + offset as usize] = value;
-                    }
-                    Mirroring::Vertical => {
-                        let offset = mirrored_addr & 0x07FF;
-                        self.vram[nametable_offset + offset as usize] = value;
-                    }
-                    Mirroring::FourScreen => {
-                        self.vram[nametable_offset + (mirrored_addr & 0x0FFF) as usize] = value;
-                    }
-                }
-            }
-            0x3F00..=0x3FFF => {
-                let palette_addr = addr & 0x1F;
-                if palette_addr == 0x10 || palette_addr == 0x14 || palette_addr == 0x18 || palette_addr == 0x1C {
-                    self.palette[(palette_addr & 0x0F) as usize] = value;
-                } else {
-                    self.palette[palette_addr as usize] = value;
-                }
-            }
-            _ => {}
+        self.oam_addr = addr;
+    }
+
+    // Helpers to inspect/modify status flags for integration (e.g., frame/vblank signaling).
+    pub fn set_vblank(&mut self, on: bool) {
+        if on {
+            self.status |= 0x80;
+        } else {
+            self.status &= !0x80;
+        }
+    }
+    pub fn set_sprite_zero_hit(&mut self, on: bool) {
+        if on {
+            self.status |= 0x40;
+        } else {
+            self.status &= !0x40;
+        }
+    }
+    pub fn set_sprite_overflow(&mut self, on: bool) {
+        if on {
+            self.status |= 0x20;
+        } else {
+            self.status &= !0x20;
         }
     }
 
-    pub fn get_frame_buffer(&self) -> &[u8] {
-        &self.frame_buffer
+    pub fn vblank(&self) -> bool {
+        (self.status & 0x80) != 0
+    }
+    pub fn sprite_zero_hit(&self) -> bool {
+        (self.status & 0x40) != 0
+    }
+    pub fn sprite_overflow(&self) -> bool {
+        (self.status & 0x20) != 0
     }
 
-    pub fn is_nmi_triggered(&self) -> bool {
-        self.nmi_triggered
+    // Whether NMI on vblank is enabled (PPUCTRL bit 7).
+    pub fn nmi_enabled(&self) -> bool {
+        (self.ctrl & 0x80) != 0
     }
 
-    pub fn ctrl(&self) -> u8 {
+    // Expose minimal VRAM access for tests/integration if needed.
+    pub fn peek_vram(&self, addr: u16) -> u8 {
+        self.vram[(addr as usize) & 0x3FFF]
+    }
+    pub fn poke_vram(&mut self, addr: u16, value: u8) {
+        self.vram[(addr as usize) & 0x3FFF] = value;
+    }
+
+    // OAM inspection for tests/integration.
+    pub fn peek_oam(&self, idx: usize) -> u8 {
+        self.oam[idx & 0xFF]
+    }
+    pub fn poke_oam(&mut self, idx: usize, value: u8) {
+        self.oam[idx & 0xFF] = value;
+    }
+
+    // Frame completion handling.
+    pub fn frame_complete(&self) -> bool {
+        self.frame_complete
+    }
+    pub fn take_frame_complete(&mut self) -> bool {
+        let was = self.frame_complete;
+        self.frame_complete = false;
+        was
+    }
+
+    pub fn take_nmi_request(&mut self) -> bool {
+        let was = self.nmi_latch;
+        self.nmi_latch = false;
+        was
+    }
+
+    // ----- Accessors for Bus integration (single source of truth in PPU) -----
+
+    // PPUCTRL accessors and VRAM increment step (bit 2 of PPUCTRL)
+    pub fn get_ctrl(&self) -> u8 {
         self.ctrl
     }
-
-    pub fn mask(&self) -> u8 {
-        self.mask
+    pub fn set_ctrl(&mut self, value: u8) {
+        self.ctrl = value;
+    }
+    pub fn vram_increment_step(&self) -> u16 {
+        if (self.ctrl & 0x04) != 0 { 32 } else { 1 }
     }
 
-    pub fn status(&self) -> u8 {
-        self.status
+    // VRAM address accessors (mask to 14 bits)
+    pub fn get_vram_addr(&self) -> u16 {
+        self.vram_addr
+    }
+    pub fn set_vram_addr(&mut self, addr: u16) {
+        self.vram_addr = addr & 0x3FFF;
     }
 
-    pub fn scanline(&self) -> i32 {
-        self.scanline
+    // PPUDATA buffered read value accessors
+    pub fn get_vram_buffer(&self) -> u8 {
+        self.vram_buffer
+    }
+    pub fn set_vram_buffer(&mut self, value: u8) {
+        self.vram_buffer = value;
     }
 
-    pub fn dot(&self) -> u32 {
-        self.dot
+    // $2005/$2006 write toggle accessors
+    pub fn get_write_toggle(&self) -> bool {
+        self.write_toggle
+    }
+    pub fn set_write_toggle(&mut self, on: bool) {
+        self.write_toggle = on;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_read_clears_vblank_and_write_toggle() {
+        let mut ppu = Ppu::new();
+        ppu.set_vblank(true);
+        ppu.write_toggle = true;
+
+        let s = ppu.read_reg(0x2002);
+        assert_ne!(s & 0x80, 0);
+        assert!(!ppu.vblank());
+        assert!(!ppu.write_toggle);
+    }
+
+    #[test]
+    fn ppudata_buffered_read_and_increment() {
+        let mut ppu = Ppu::new();
+        // Set VRAM increment to 1
+        ppu.write_reg(0x2000, 0x00);
+
+        // Write VRAM at 0x0000 and 0x0001
+        ppu.vram[0x0000] = 0x11;
+        ppu.vram[0x0001] = 0x22;
+
+        // Set address to 0x0000
+        ppu.write_reg(0x2006, 0x00);
+        ppu.write_reg(0x2006, 0x00);
+
+        // First read returns buffer (initially 0)
+        assert_eq!(ppu.read_reg(0x2007), 0x00);
+        // Second read returns previous value at 0x0000, buffer updated to 0x22
+        assert_eq!(ppu.read_reg(0x2007), 0x11);
+        // Third read returns 0x22
+        assert_eq!(ppu.read_reg(0x2007), 0x22);
+    }
+
+    #[test]
+    fn oam_dma_writes_wrap_and_update_oamaddr() {
+        let mut ppu = Ppu::new();
+        ppu.write_reg(0x2003, 0xFE); // OAMADDR = 0xFE
+
+        let mut buf = [0u8; 256];
+        for i in 0..256 {
+            buf[i] = i as u8;
+        }
+        ppu.oam_dma_copy(&buf);
+
+        assert_eq!(ppu.peek_oam(0xFE), 0x00);
+        assert_eq!(ppu.peek_oam(0xFF), 0x01);
+        assert_eq!(ppu.peek_oam(0x00), 0x02);
+        assert_eq!(ppu.peek_oam(0x01), 0x03);
+        // OAMADDR advanced by 256 (wraps), so +0 from 0xFE -> 0xFE
+        assert_eq!(ppu.read_reg(0x2003), 0xFE);
     }
 }

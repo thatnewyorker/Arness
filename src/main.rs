@@ -1,74 +1,86 @@
-mod cpu6502;
-mod ppu;
-mod rom;
-use cpu6502::Cpu6502;
-use rom::Rom;
-use minifb::{Key, Window, WindowOptions};
-use std::env;
+use arness::{Bus, Cartridge, Cpu6502};
+
+fn build_test_ines() -> Vec<u8> {
+    // iNES header
+    let mut header = Vec::with_capacity(16);
+    header.extend_from_slice(b"NES\x1A");
+    header.push(1); // 1 x 16KB PRG
+    header.push(1); // 1 x 8KB CHR
+    header.push(0); // flags6 (horizontal mirroring, no trainer, no battery)
+    header.push(0); // flags7
+    header.push(1); // PRG-RAM size in 8KB units (allocate 8KB)
+    header.extend_from_slice(&[0u8; 7]); // padding
+
+    // PRG ROM 16KB
+    let mut prg = vec![0u8; 16 * 1024];
+
+    // Program at $8000 (offset 0x0000 in PRG)
+    let program: &[u8] = &[
+        0xA9, 0x10, // LDA #$10
+        0x69, 0x05, // ADC #$05 => A = 0x15
+        0x8D, 0x00, 0x02, // STA $0200
+        0xE8, // INX
+        0xD0, 0xFD, // BNE -3 -> loop until X wraps to 0
+        0x00, // BRK
+    ];
+    prg[..program.len()].copy_from_slice(program);
+
+    // Vectors (NMI, RESET, IRQ) at top of 16KB bank mirrored to $C000-$FFFF:
+    // $FFFA/$FFFB (NMI), $FFFC/$FFFD (RESET), $FFFE/$FFFF (IRQ/BRK)
+    // For 16KB PRG, these map to offsets 0x3FFA..0x3FFF in the single bank
+    let reset: u16 = 0x8000;
+    let nmi: u16 = 0x8000;
+    let irq: u16 = 0x8000;
+    prg[0x3FFA] = (nmi & 0xFF) as u8;
+    prg[0x3FFB] = (nmi >> 8) as u8;
+    prg[0x3FFC] = (reset & 0xFF) as u8;
+    prg[0x3FFD] = (reset >> 8) as u8;
+    prg[0x3FFE] = (irq & 0xFF) as u8;
+    prg[0x3FFF] = (irq >> 8) as u8;
+
+    // CHR ROM 8KB (zeros)
+    let chr = vec![0u8; 8 * 1024];
+
+    let mut rom = header;
+    rom.extend_from_slice(&prg);
+    rom.extend_from_slice(&chr);
+    rom
+}
 
 fn main() {
-    // Get the ROM path from command-line arguments
-    let args: Vec<String> = env::args().collect();
-    let rom_path = match args.len() {
-        2 => &args[1],  // Borrow the ROM path as &String
-        _ => {
-            eprintln!("Usage: {} <path to ROM file>", args[0]);
-            eprintln!("Example: {} /home/gerard/ROMs/NES/Donkey_Kong/dk.nes", args[0]);
-            std::process::exit(1);
+    // Build a simple NROM cartridge with our demo program
+    let rom = build_test_ines();
+    let cart = Cartridge::from_ines_bytes(&rom).expect("failed to parse iNES");
+
+    // Create Bus and attach the cartridge
+    let mut bus = Bus::new();
+    bus.attach_cartridge(cart);
+
+    // Create CPU and reset using reset vector from Bus
+    let mut cpu = Cpu6502::new();
+    cpu.reset(&mut bus);
+
+    // Run until one PPU frame completes (with a safety cap)
+    let mut instr_count: usize = 0;
+    let max_instr: usize = 1_000_000;
+    'frame: loop {
+        let _cycles = cpu.step(&mut bus);
+        if bus.ppu.take_frame_complete() {
+            break 'frame;
         }
-    };
-
-    // Load ROM (convert &String to &str using as_str())
-    let rom = Rom::load_from_file(rom_path.as_str()).expect("Failed to load ROM");
-    println!("ROM loaded: PRG size = {}, CHR size = {}, Mapper = {}", 
-             rom.prg_size(), rom.chr_size(), rom.mapper());  // Use method calls
-
-    // Initialize CPU and PPU
-    let mut cpu = Cpu6502::new(rom.chr_size(), rom.chr_ram_size(), rom.mirroring());
-    cpu.load_rom(&rom).expect("Failed to load ROM");
-    cpu.ppu.load_chr_rom(rom.chr_rom()).expect("Failed to load CHR-ROM");
-
-    // Quick fix: Force-enable PPU rendering
-    cpu.ppu.write(0x2000, 0x80); // PPUCTRL: Enable NMI
-    cpu.ppu.write(0x2001, 0x1E); // PPUMASK: Show background and sprites, no clipping
-
-    // Force nametable and palette initialization (temporary)
-    for i in 0x2000..0x23FF {  // Fill nametable 0 with a checkerboard pattern
-        cpu.ppu.write_vram(i, if (i / 32 + i % 32) % 2 == 0 { 0x00 } else { 0x01 });
-    }
-    for i in 0x3F00..0x3F10 {  // Set simple palette (black and gray)
-        cpu.ppu.write_vram(i, if i == 0x3F00 { 0x0F } else { 0x20 });
+        instr_count += 1;
+        if instr_count >= max_instr {
+            break;
+        }
     }
 
-    // Print reset vector for confirmation
-    println!("Reset vector: {:#06x}", cpu.pc);
-
-    // Set up window
-    let width = 256;
-    let height = 240;
-    let mut window = Window::new(
-        "NES Emulator Test",
-        width,
-        height,
-        WindowOptions::default(),
-    ).unwrap_or_else(|e| panic!("Failed to create window: {}", e));
-    window.set_target_fps(60);
-
-    // Main loop with debug prints
-    let mut frame_count = 0;
-    while window.is_open() && !window.is_key_down(Key::Escape) {
-        cpu.run(29800);  // Exact NTSC frame (29780.5 rounded up)
-        frame_count += 1;
-
-        println!("Frame: {}, PC: {:#06x}, A: {:#04x}, X: {:#04x}, Y: {:#04x}, Status: {:#04x}, PPU Ctrl: {:#04x}, Mask: {:#04x}, Scanline: {}, Dot: {}",
-                 frame_count, cpu.pc, cpu.a, cpu.x, cpu.y, cpu.status, cpu.ppu.ctrl(), cpu.ppu.mask(), cpu.ppu.scanline(), cpu.ppu.dot());
-
-        let buffer: Vec<u32> = cpu.ppu.get_frame_buffer()
-            .chunks(3)
-            .map(|rgb| (rgb[0] as u32) << 16 | (rgb[1] as u32) << 8 | (rgb[2] as u32))
-            .collect();
-
-        window.update_with_buffer(&buffer, width, height)
-            .unwrap_or_else(|e| println!("Failed to update window: {}", e));
-    }
+    // Inspect state
+    let m0200 = bus.read(0x0200);
+    println!("A: 0x{:02X}", cpu.a);
+    println!("X: 0x{:02X}", cpu.x);
+    println!("Y: 0x{:02X}", cpu.y);
+    println!("SP: 0x{:02X}", cpu.sp);
+    println!("PC: 0x{:04X}", cpu.pc);
+    println!("P (flags): 0b{:08b}", cpu.status);
+    println!("mem[0x0200]: 0x{:02X}", m0200);
 }

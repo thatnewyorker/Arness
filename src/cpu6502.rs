@@ -1,893 +1,1539 @@
-use crate::ppu::Ppu;
+/*!
+Bus-integrated 6502 CPU core
 
-const CARRY: u8 = 0b0000_0001;
-const ZERO: u8 = 0b0000_0010;
-const INTERRUPT_DISABLE: u8 = 0b0000_0100;
-const OVERFLOW: u8 = 0b0100_0000;
-const NEGATIVE: u8 = 0b1000_0000;
+Features:
+- 64KiB CPU address space accessed only via Bus
+- Full register set and flags
+- Reset vector handling via Bus
+- Fetch-Decode-Execute via `step(&mut self, &mut Bus)`
+- Broad opcode coverage with addressing modes:
+  - Immediate, Implied, Accumulator
+  - Zero Page, Zero Page,X, Zero Page,Y
+  - Absolute, Absolute,X, Absolute,Y
+  - (Indirect,X), (Indirect),Y, and JMP (Indirect) with 6502 page bug
+  - Relative (branches)
+- Correct BRK/RTI/IRQ/NMI stack/flag push semantics (B/U bits)
+- Helper APIs: reset, run, irq, nmi, and a compatibility `lda_immediate`
 
+Note:
+- No cycle counting/timing in this revision.
+*/
+
+use crate::bus::Bus;
+
+#[allow(dead_code)]
 pub struct Cpu6502 {
-    pub a: u8,
-    pub x: u8,
-    pub y: u8,
-    pub sp: u8,
-    pub pc: u16,
-    pub status: u8,
-    pub memory: [u8; 65536],
-    pub ppu: Ppu,
+    // Registers
+    pub a: u8,      // Accumulator
+    pub x: u8,      // X Index
+    pub y: u8,      // Y Index
+    pub sp: u8,     // Stack Pointer
+    pub pc: u16,    // Program Counter
+    pub status: u8, // Processor Status (NV-BDIZC) (bit 5 always set)
+
+    // Control
+    halted: bool,
 }
 
+// Processor status flags (bit positions)
+const CARRY: u8 = 0b0000_0001; // C
+const ZERO: u8 = 0b0000_0010; // Z
+const IRQ_DISABLE: u8 = 0b0000_0100; // I
+const DECIMAL: u8 = 0b0000_1000; // D (on NES CPU, ADC/SBC are binary regardless)
+const BREAK: u8 = 0b0001_0000; // B (special on push)
+const UNUSED: u8 = 0b0010_0000; // U (always set)
+const OVERFLOW: u8 = 0b0100_0000; // V
+const NEGATIVE: u8 = 0b1000_0000; // N
+
 impl Cpu6502 {
-    pub fn new(chr_size: usize, chr_ram_size: usize, mirroring: crate::rom::Mirroring) -> Self {
+    pub fn new() -> Self {
         Cpu6502 {
             a: 0,
             x: 0,
             y: 0,
             sp: 0xFD,
-            pc: 0x8000,
-            status: 0x24,
-            memory: [0; 65536],
-            ppu: Ppu::new(chr_size, chr_ram_size, mirroring),
+            pc: 0x0000,
+            status: IRQ_DISABLE | UNUSED, // typical power-up (I and U set)
+            halted: false,
         }
     }
 
-    pub fn load_rom(&mut self, rom: &crate::rom::Rom) -> Result<(), String> {
-        if rom.mapper() != 0 {
-            return Err("Only mapper 0 (NROM) is supported for now".to_string());
+    /// Reset CPU registers and load PC from the reset vector at $FFFC/$FFFD via Bus.
+    pub fn reset(&mut self, bus: &mut Bus) {
+        self.a = 0;
+        self.x = 0;
+        self.y = 0;
+        self.sp = 0xFD;
+        self.status = IRQ_DISABLE | UNUSED;
+        self.pc = bus.read_word(0xFFFC);
+        self.halted = false;
+    }
+
+    /// Run up to `max_instructions` steps or until halted.
+    pub fn run(&mut self, bus: &mut Bus, max_instructions: usize) {
+        for _ in 0..max_instructions {
+            if self.halted {
+                break;
+            }
+            self.step(bus);
+        }
+    }
+
+    /// Fetch-Decode-Execute one instruction.
+    pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        // Handle DMA stall while OAM DMA is active: consume one CPU cycle without executing an opcode
+        if bus.dma_is_active() {
+            bus.tick(1);
+            return 1;
         }
 
-        let prg_data = rom.prg_rom();
-        if prg_data.len() != 16 * 1024 && prg_data.len() != 32 * 1024 {
-            return Err("PRG-ROM size must be 16 KB or 32 KB for NROM".to_string());
+        // Service NMI if pending (before fetching next opcode)
+        if bus.nmi_pending {
+            // Push PC and P (B=0 on push), set I, and jump to NMI vector
+            self.push_word(self.pc, bus);
+            self.push_status_with_break(false, bus);
+            self.set_flag(IRQ_DISABLE, true);
+            self.pc = bus.read_word(0xFFFA);
+            bus.nmi_pending = false;
+
+            bus.tick(7);
+            return 7;
         }
 
-        for (i, &byte) in prg_data.iter().enumerate() {
-            self.memory[0x8000 + i] = byte;
+        // Service IRQ if asserted and I flag clear (before fetching next opcode)
+        if bus.irq_line && !self.get_flag(IRQ_DISABLE) {
+            self.push_word(self.pc, bus);
+            self.push_status_with_break(false, bus);
+            self.set_flag(IRQ_DISABLE, true);
+            self.pc = bus.read_word(0xFFFE);
+
+            bus.tick(7);
+            return 7;
         }
 
-        if prg_data.len() == 16 * 1024 {
-            for i in 0..16 * 1024 {
-                self.memory[0xC000 + i] = self.memory[0x8000 + i];
+        let opcode = bus.read(self.pc);
+        self.pc = self.pc.wrapping_add(1);
+        let mut cycles: u32 = Self::base_cycles(opcode);
+
+        match opcode {
+            // --------- Load/Store ---------
+            // LDA
+            0xA9 => {
+                let v = self.fetch_byte(bus);
+                self.lda(v);
+            } // imm
+            0xA5 => {
+                let a = self.addr_zp(bus);
+                self.lda(bus.read(a));
+            } // zp
+            0xB5 => {
+                let a = self.addr_zp_x(bus);
+                self.lda(bus.read(a));
+            } // zp,X
+            0xAD => {
+                let a = self.addr_abs(bus);
+                self.lda(bus.read(a));
+            } // abs
+            0xBD => {
+                let (a, crossed) = self.addr_abs_x_pc(bus);
+                self.lda(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            } // abs,X
+            0xB9 => {
+                let (a, crossed) = self.addr_abs_y_pc(bus);
+                self.lda(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            } // abs,Y
+            0xA1 => {
+                let a = self.addr_ind_x(bus);
+                self.lda(bus.read(a));
+            } // (ind,X)
+            0xB1 => {
+                let (a, crossed) = self.addr_ind_y_pc(bus);
+                self.lda(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            } // (ind),Y
+
+            // LDX
+            0xA2 => {
+                let v = self.fetch_byte(bus);
+                self.ldx(v);
+            } // imm
+            0xA6 => {
+                let a = self.addr_zp(bus);
+                self.ldx(bus.read(a));
+            } // zp
+            0xB6 => {
+                let a = self.addr_zp_y(bus);
+                self.ldx(bus.read(a));
+            } // zp,Y
+            0xAE => {
+                let a = self.addr_abs(bus);
+                self.ldx(bus.read(a));
+            } // abs
+            0xBE => {
+                let (a, crossed) = self.addr_abs_y_pc(bus);
+                self.ldx(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            } // abs,Y
+
+            // LDY
+            0xA0 => {
+                let v = self.fetch_byte(bus);
+                self.ldy(v);
+            } // imm
+            0xA4 => {
+                let a = self.addr_zp(bus);
+                self.ldy(bus.read(a));
+            } // zp
+            0xB4 => {
+                let a = self.addr_zp_x(bus);
+                self.ldy(bus.read(a));
+            } // zp,X
+            0xAC => {
+                let a = self.addr_abs(bus);
+                self.ldy(bus.read(a));
+            } // abs
+            0xBC => {
+                let (a, crossed) = self.addr_abs_x_pc(bus);
+                self.ldy(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            } // abs,X
+
+            // STA
+            0x85 => {
+                let a = self.addr_zp(bus);
+                bus.write(a, self.a);
+            }
+            0x95 => {
+                let a = self.addr_zp_x(bus);
+                bus.write(a, self.a);
+            }
+            0x8D => {
+                let a = self.addr_abs(bus);
+                bus.write(a, self.a);
+            }
+            0x9D => {
+                let a = self.addr_abs_x(bus);
+                bus.write(a, self.a);
+            }
+            0x99 => {
+                let a = self.addr_abs_y(bus);
+                bus.write(a, self.a);
+            }
+            0x81 => {
+                let a = self.addr_ind_x(bus);
+                bus.write(a, self.a);
+            }
+            0x91 => {
+                let a = self.addr_ind_y(bus);
+                bus.write(a, self.a);
+            }
+
+            // STX
+            0x86 => {
+                let a = self.addr_zp(bus);
+                bus.write(a, self.x);
+            }
+            0x96 => {
+                let a = self.addr_zp_y(bus);
+                bus.write(a, self.x);
+            }
+            0x8E => {
+                let a = self.addr_abs(bus);
+                bus.write(a, self.x);
+            }
+
+            // STY
+            0x84 => {
+                let a = self.addr_zp(bus);
+                bus.write(a, self.y);
+            }
+            0x94 => {
+                let a = self.addr_zp_x(bus);
+                bus.write(a, self.y);
+            }
+            0x8C => {
+                let a = self.addr_abs(bus);
+                bus.write(a, self.y);
+            }
+
+            // --------- Transfers ---------
+            0xAA => self.tax(),
+            0xA8 => self.tay(),
+            0x8A => self.txa(),
+            0x98 => self.tya(),
+            0xBA => self.tsx(),
+            0x9A => self.txs(),
+
+            // --------- Stack ---------
+            0x48 => self.pha(bus),
+            0x68 => self.pla(bus),
+            0x08 => self.php(bus), // B set on push
+            0x28 => self.plp(bus),
+
+            // --------- Increment/Decrement ---------
+            0xE8 => self.inx(),
+            0xC8 => self.iny(),
+            0xCA => self.dex(),
+            0x88 => self.dey(),
+
+            0xE6 => {
+                let a = self.addr_zp(bus);
+                self.inc_mem(a, bus);
+            }
+            0xF6 => {
+                let a = self.addr_zp_x(bus);
+                self.inc_mem(a, bus);
+            }
+            0xEE => {
+                let a = self.addr_abs(bus);
+                self.inc_mem(a, bus);
+            }
+            0xFE => {
+                let a = self.addr_abs_x(bus);
+                self.inc_mem(a, bus);
+            }
+
+            0xC6 => {
+                let a = self.addr_zp(bus);
+                self.dec_mem(a, bus);
+            }
+            0xD6 => {
+                let a = self.addr_zp_x(bus);
+                self.dec_mem(a, bus);
+            }
+            0xCE => {
+                let a = self.addr_abs(bus);
+                self.dec_mem(a, bus);
+            }
+            0xDE => {
+                let a = self.addr_abs_x(bus);
+                self.dec_mem(a, bus);
+            }
+
+            // --------- Logical (AND/ORA/EOR/BIT) ---------
+            // AND
+            0x29 => {
+                let v = self.fetch_byte(bus);
+                self.and(v);
+            }
+            0x25 => {
+                let a = self.addr_zp(bus);
+                self.and(bus.read(a));
+            }
+            0x35 => {
+                let a = self.addr_zp_x(bus);
+                self.and(bus.read(a));
+            }
+            0x2D => {
+                let a = self.addr_abs(bus);
+                self.and(bus.read(a));
+            }
+            0x3D => {
+                let (a, crossed) = self.addr_abs_x_pc(bus);
+                self.and(bus.read(a));
+                if crossed {
+                    cycles += 1;
+                }
+            }
+            0x39 => {
+                let (a, crossed) = self.addr_abs_y_pc(bus);
+                self.and(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0x21 => {
+                let a = self.addr_ind_x(bus);
+                self.and(bus.read(a));
+            }
+            0x31 => {
+                let (a, crossed) = self.addr_ind_y_pc(bus);
+                self.and(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+
+            // ORA
+            0x09 => {
+                let v = self.fetch_byte(bus);
+                self.ora(v);
+            }
+            0x05 => {
+                let a = self.addr_zp(bus);
+                self.ora(bus.read(a));
+            }
+            0x15 => {
+                let a = self.addr_zp_x(bus);
+                self.ora(bus.read(a));
+            }
+            0x0D => {
+                let a = self.addr_abs(bus);
+                self.ora(bus.read(a));
+            }
+            0x1D => {
+                let (a, crossed) = self.addr_abs_x_pc(bus);
+                self.ora(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0x19 => {
+                let (a, crossed) = self.addr_abs_y_pc(bus);
+                self.ora(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0x01 => {
+                let a = self.addr_ind_x(bus);
+                self.ora(bus.read(a));
+            }
+            0x11 => {
+                let (a, crossed) = self.addr_ind_y_pc(bus);
+                self.ora(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+
+            // EOR
+            0x49 => {
+                let v = self.fetch_byte(bus);
+                self.eor(v);
+            }
+            0x45 => {
+                let a = self.addr_zp(bus);
+                self.eor(bus.read(a));
+            }
+            0x55 => {
+                let a = self.addr_zp_x(bus);
+                self.eor(bus.read(a));
+            }
+            0x4D => {
+                let a = self.addr_abs(bus);
+                self.eor(bus.read(a));
+            }
+            0x5D => {
+                let (a, crossed) = self.addr_abs_x_pc(bus);
+                self.eor(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0x59 => {
+                let (a, crossed) = self.addr_abs_y_pc(bus);
+                self.eor(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0x41 => {
+                let a = self.addr_ind_x(bus);
+                self.eor(bus.read(a));
+            }
+            0x51 => {
+                let (a, crossed) = self.addr_ind_y_pc(bus);
+                self.eor(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+
+            // BIT
+            0x24 => {
+                let a = self.addr_zp(bus);
+                self.bit(bus.read(a));
+            }
+            0x2C => {
+                let a = self.addr_abs(bus);
+                self.bit(bus.read(a));
+            }
+
+            // --------- Shifts and Rotates ---------
+            // ASL
+            0x0A => self.asl_acc(),
+            0x06 => {
+                let a = self.addr_zp(bus);
+                self.asl_mem(a, bus);
+            }
+            0x16 => {
+                let a = self.addr_zp_x(bus);
+                self.asl_mem(a, bus);
+            }
+            0x0E => {
+                let a = self.addr_abs(bus);
+                self.asl_mem(a, bus);
+            }
+            0x1E => {
+                let a = self.addr_abs_x(bus);
+                self.asl_mem(a, bus);
+            }
+
+            // LSR
+            0x4A => self.lsr_acc(),
+            0x46 => {
+                let a = self.addr_zp(bus);
+                self.lsr_mem(a, bus);
+            }
+            0x56 => {
+                let a = self.addr_zp_x(bus);
+                self.lsr_mem(a, bus);
+            }
+            0x4E => {
+                let a = self.addr_abs(bus);
+                self.lsr_mem(a, bus);
+            }
+            0x5E => {
+                let a = self.addr_abs_x(bus);
+                self.lsr_mem(a, bus);
+            }
+
+            // ROL
+            0x2A => self.rol_acc(),
+            0x26 => {
+                let a = self.addr_zp(bus);
+                self.rol_mem(a, bus);
+            }
+            0x36 => {
+                let a = self.addr_zp_x(bus);
+                self.rol_mem(a, bus);
+            }
+            0x2E => {
+                let a = self.addr_abs(bus);
+                self.rol_mem(a, bus);
+            }
+            0x3E => {
+                let a = self.addr_abs_x(bus);
+                self.rol_mem(a, bus);
+            }
+
+            // ROR
+            0x6A => self.ror_acc(),
+            0x66 => {
+                let a = self.addr_zp(bus);
+                self.ror_mem(a, bus);
+            }
+            0x76 => {
+                let a = self.addr_zp_x(bus);
+                self.ror_mem(a, bus);
+            }
+            0x6E => {
+                let a = self.addr_abs(bus);
+                self.ror_mem(a, bus);
+            }
+            0x7E => {
+                let a = self.addr_abs_x(bus);
+                self.ror_mem(a, bus);
+            }
+
+            // --------- Flags ---------
+            0x18 => self.set_flag(CARRY, false),       // CLC
+            0x38 => self.set_flag(CARRY, true),        // SEC
+            0x58 => self.set_flag(IRQ_DISABLE, false), // CLI
+            0x78 => self.set_flag(IRQ_DISABLE, true),  // SEI
+            0xD8 => self.set_flag(DECIMAL, false),     // CLD
+            0xF8 => self.set_flag(DECIMAL, true),      // SED (binary ADC/SBC on NES)
+            0xB8 => self.set_flag(OVERFLOW, false),    // CLV
+
+            // --------- Compare ---------
+            // CMP
+            0xC9 => {
+                let v = self.fetch_byte(bus);
+                self.cmp(self.a, v);
+            }
+            0xC5 => {
+                let a = self.addr_zp(bus);
+                self.cmp(self.a, bus.read(a));
+            }
+            0xD5 => {
+                let a = self.addr_zp_x(bus);
+                self.cmp(self.a, bus.read(a));
+            }
+            0xCD => {
+                let a = self.addr_abs(bus);
+                self.cmp(self.a, bus.read(a));
+            }
+            0xDD => {
+                let (a, crossed) = self.addr_abs_x_pc(bus);
+                self.cmp(self.a, bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0xD9 => {
+                let (a, crossed) = self.addr_abs_y_pc(bus);
+                self.cmp(self.a, bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0xC1 => {
+                let a = self.addr_ind_x(bus);
+                self.cmp(self.a, bus.read(a));
+            }
+            0xD1 => {
+                let (a, crossed) = self.addr_ind_y_pc(bus);
+                self.cmp(self.a, bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+
+            // CPX
+            0xE0 => {
+                let v = self.fetch_byte(bus);
+                self.cmp(self.x, v);
+            }
+            0xE4 => {
+                let a = self.addr_zp(bus);
+                self.cmp(self.x, bus.read(a));
+            }
+            0xEC => {
+                let a = self.addr_abs(bus);
+                self.cmp(self.x, bus.read(a));
+            }
+
+            // CPY
+            0xC0 => {
+                let v = self.fetch_byte(bus);
+                self.cmp(self.y, v);
+            }
+            0xC4 => {
+                let a = self.addr_zp(bus);
+                self.cmp(self.y, bus.read(a));
+            }
+            0xCC => {
+                let a = self.addr_abs(bus);
+                self.cmp(self.y, bus.read(a));
+            }
+
+            // --------- Branches ---------
+            0x10 => {
+                cycles += self.branch_cond(bus, !self.get_flag(NEGATIVE));
+            } // BPL
+            0x30 => {
+                cycles += self.branch_cond(bus, self.get_flag(NEGATIVE));
+            } // BMI
+            0x50 => {
+                cycles += self.branch_cond(bus, !self.get_flag(OVERFLOW));
+            } // BVC
+            0x70 => {
+                cycles += self.branch_cond(bus, self.get_flag(OVERFLOW));
+            } // BVS
+            0x90 => {
+                cycles += self.branch_cond(bus, !self.get_flag(CARRY));
+            } // BCC
+            0xB0 => {
+                cycles += self.branch_cond(bus, self.get_flag(CARRY));
+            } // BCS
+            0xD0 => {
+                cycles += self.branch_cond(bus, !self.get_flag(ZERO));
+            } // BNE
+            0xF0 => {
+                cycles += self.branch_cond(bus, self.get_flag(ZERO));
+            } // BEQ
+
+            // --------- Jumps/Subroutines/Returns ---------
+            0x4C => {
+                let a = self.addr_abs(bus);
+                self.pc = a;
+            } // JMP abs
+            0x6C => {
+                let a = self.addr_abs(bus);
+                self.pc = self.read_word_indirect_bug(bus, a);
+            } // JMP (ind)
+            0x20 => {
+                let a = self.addr_abs(bus);
+                let ret = self.pc.wrapping_sub(1);
+                self.push_word(ret, bus);
+                self.pc = a;
+            } // JSR
+            0x60 => {
+                self.pc = self.pop_word(bus).wrapping_add(1);
+            } // RTS
+
+            // --------- ADC/SBC ---------
+            // ADC
+            0x69 => {
+                let v = self.fetch_byte(bus);
+                self.adc(v);
+            } // imm
+            0x65 => {
+                let a = self.addr_zp(bus);
+                self.adc(bus.read(a));
+            }
+            0x75 => {
+                let a = self.addr_zp_x(bus);
+                self.adc(bus.read(a));
+            }
+            0x6D => {
+                let a = self.addr_abs(bus);
+                self.adc(bus.read(a));
+            }
+            0x7D => {
+                let (a, crossed) = self.addr_abs_x_pc(bus);
+                self.adc(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0x79 => {
+                let (a, crossed) = self.addr_abs_y_pc(bus);
+                self.adc(bus.read(a));
+                if crossed {
+                    cycles += 1;
+                }
+            }
+            0x61 => {
+                let a = self.addr_ind_x(bus);
+                self.adc(bus.read(a));
+            }
+            0x71 => {
+                let (a, crossed) = self.addr_ind_y_pc(bus);
+                self.adc(bus.read(a));
+                if crossed {
+                    cycles += 1;
+                }
+            }
+
+            // SBC
+            0xE9 => {
+                let v = self.fetch_byte(bus);
+                self.sbc(v);
+            } // imm
+            0xE5 => {
+                let a = self.addr_zp(bus);
+                self.sbc(bus.read(a));
+            }
+            0xF5 => {
+                let a = self.addr_zp_x(bus);
+                self.sbc(bus.read(a));
+            }
+            0xED => {
+                let a = self.addr_abs(bus);
+                self.sbc(bus.read(a));
+            }
+            0xFD => {
+                let (a, crossed) = self.addr_abs_x_pc(bus);
+                self.sbc(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0xF9 => {
+                let (a, crossed) = self.addr_abs_y_pc(bus);
+                self.sbc(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+            0xE1 => {
+                let a = self.addr_ind_x(bus);
+                self.sbc(bus.read(a));
+            }
+            0xF1 => {
+                let (a, crossed) = self.addr_ind_y_pc(bus);
+                self.sbc(bus.read(a));
+                self.add_page_cross_penalty(&mut cycles, crossed);
+            }
+
+            // --------- Interrupts ---------
+            // BRK: push PC, push P with B set, set I, jump to $FFFE (here also halt demo-run)
+            0x00 => {
+                let pc_to_push = self.pc;
+                self.push_word(pc_to_push, bus);
+                self.php(bus); // B set
+                self.set_flag(IRQ_DISABLE, true);
+                self.pc = bus.read_word(0xFFFE);
+                self.halted = true;
+                cycles = 7;
+            }
+            0x40 => {
+                self.rti(bus);
+            } // RTI
+
+            // --------- NOP ---------
+            0xEA => { /* NOP */ }
+
+            // Unknown/unimplemented: halt to avoid undefined execution
+            _ => {
+                self.halted = true;
             }
         }
-
-        self.pc = self.read_word(0xFFFC);
-        Ok(())
-    }
-
-    fn set_status_flag(&mut self, flag: u8) {
-        self.status |= flag;
-    }
-
-    fn clear_status_flag(&mut self, flag: u8) {
-        self.status &= flag ^ 0xFF;
-    }
-
-    fn is_status_flag_set(&self, flag: u8) -> bool {
-        self.status & flag != 0
-    }
-
-    fn update_zero_and_negative_flags(&mut self, result: u8) {
-        if result == 0 {
-            self.set_status_flag(ZERO);
+        let ret_cycles = cycles;
+        let tick_cycles = if Self::is_rmw(opcode) {
+            cycles.saturating_sub(2)
         } else {
-            self.clear_status_flag(ZERO);
+            cycles
+        };
+        bus.tick(tick_cycles);
+        ret_cycles
+    }
+
+    // Base cycles table (scaffolding) and penalty hooks
+    #[inline]
+    fn base_cycles(op: u8) -> u32 {
+        match op {
+            // Loads
+            0xA9 => 2, // LDA #imm
+            0xA5 => 3,
+            0xB5 => 4,
+            0xAD => 4,
+            0xBD => 4,
+            0xB9 => 4,
+            0xA1 => 6,
+            0xB1 => 5,
+            0xA2 => 2,
+            0xA6 => 3,
+            0xB6 => 4,
+            0xAE => 4,
+            0xBE => 4, // LDX
+            0xA0 => 2,
+            0xA4 => 3,
+            0xB4 => 4,
+            0xAC => 4,
+            0xBC => 4, // LDY
+
+            // Stores
+            0x85 => 3,
+            0x95 => 4,
+            0x8D => 4,
+            0x9D => 5,
+            0x99 => 5,
+            0x81 => 6,
+            0x91 => 6, // STA
+            0x86 => 3,
+            0x96 => 4,
+            0x8E => 4, // STX
+            0x84 => 3,
+            0x94 => 4,
+            0x8C => 4, // STY
+
+            // Transfers
+            0xAA => 2,
+            0xA8 => 2,
+            0x8A => 2,
+            0x98 => 2,
+            0xBA => 2,
+            0x9A => 2,
+
+            // Stack
+            0x48 => 3,
+            0x68 => 4,
+            0x08 => 3,
+            0x28 => 4,
+
+            // Inc/Dec
+            0xE8 => 2,
+            0xC8 => 2,
+            0xCA => 2,
+            0x88 => 2,
+            0xE6 => 5,
+            0xF6 => 6,
+            0xEE => 6,
+            0xFE => 7,
+            0xC6 => 5,
+            0xD6 => 6,
+            0xCE => 6,
+            0xDE => 7,
+
+            // Logical
+            0x29 => 2,
+            0x25 => 3,
+            0x35 => 4,
+            0x2D => 4,
+            0x3D => 4,
+            0x39 => 4,
+            0x21 => 6,
+            0x31 => 5, // AND
+            0x09 => 2,
+            0x05 => 3,
+            0x15 => 4,
+            0x0D => 4,
+            0x1D => 4,
+            0x19 => 4,
+            0x01 => 6,
+            0x11 => 5, // ORA
+            0x49 => 2,
+            0x45 => 3,
+            0x55 => 4,
+            0x4D => 4,
+            0x5D => 4,
+            0x59 => 4,
+            0x41 => 6,
+            0x51 => 5, // EOR
+            0x24 => 3,
+            0x2C => 4, // BIT
+
+            // Shifts/Rotates (accumulator / memory)
+            0x0A => 2,
+            0x06 => 5,
+            0x16 => 6,
+            0x0E => 6,
+            0x1E => 7, // ASL
+            0x4A => 2,
+            0x46 => 5,
+            0x56 => 6,
+            0x4E => 6,
+            0x5E => 7, // LSR
+            0x2A => 2,
+            0x26 => 5,
+            0x36 => 6,
+            0x2E => 6,
+            0x3E => 7, // ROL
+            0x6A => 2,
+            0x66 => 5,
+            0x76 => 6,
+            0x6E => 6,
+            0x7E => 7, // ROR
+
+            // Flags
+            0x18 => 2,
+            0x38 => 2,
+            0x58 => 2,
+            0x78 => 2,
+            0xD8 => 2,
+            0xF8 => 2,
+            0xB8 => 2,
+
+            // Compare
+            0xC9 => 2,
+            0xC5 => 3,
+            0xD5 => 4,
+            0xCD => 4,
+            0xDD => 4,
+            0xD9 => 4,
+            0xC1 => 6,
+            0xD1 => 5, // CMP
+            0xE0 => 2,
+            0xE4 => 3,
+            0xEC => 4, // CPX
+            0xC0 => 2,
+            0xC4 => 3,
+            0xCC => 4, // CPY
+
+            // Branches (base cycles; add penalties when taken/page-cross)
+            0x10 => 2,
+            0x30 => 2,
+            0x50 => 2,
+            0x70 => 2,
+            0x90 => 2,
+            0xB0 => 2,
+            0xD0 => 2,
+            0xF0 => 2,
+
+            // Jumps/Subroutines
+            0x4C => 3,
+            0x6C => 5,
+            0x20 => 6,
+            0x60 => 6,
+
+            // ADC/SBC
+            0x69 => 2,
+            0x65 => 3,
+            0x75 => 4,
+            0x6D => 4,
+            0x7D => 4,
+            0x79 => 4,
+            0x61 => 6,
+            0x71 => 5, // ADC
+            0xE9 => 2,
+            0xE5 => 3,
+            0xF5 => 4,
+            0xED => 4,
+            0xFD => 4,
+            0xF9 => 4,
+            0xE1 => 6,
+            0xF1 => 5, // SBC
+
+            // Interrupts / NOP
+            0x00 => 7,
+            0x40 => 6,
+            0xEA => 2,
+
+            // Temporary default; fill remaining opcodes as needed.
+            _ => 2,
         }
-        if result & NEGATIVE != 0 {
-            self.set_status_flag(NEGATIVE);
-        } else {
-            self.clear_status_flag(NEGATIVE);
-        }
     }
 
-    fn immediate(&self) -> u8 {
-        self.read_cpu(self.pc.wrapping_add(1))
-    }
+    // ------------------------
+    // Public helper API
+    // ------------------------
 
-    fn absolute(&self) -> u16 {
-        self.read_word_cpu(self.pc.wrapping_add(1))
-    }
-
-    fn zero_page(&self) -> u16 {
-        self.read_cpu(self.pc.wrapping_add(1)) as u16
-    }
-
-    fn zero_page_x(&self) -> u16 {
-        self.read_cpu(self.pc.wrapping_add(1)).wrapping_add(self.x) as u16
-    }
-
-    fn zero_page_y(&self) -> u16 {
-        self.read_cpu(self.pc.wrapping_add(1)).wrapping_add(self.y) as u16
-    }
-
-    fn absolute_x(&self) -> u16 {
-        self.read_word_cpu(self.pc.wrapping_add(1)).wrapping_add(self.x as u16)
-    }
-
-    fn absolute_y(&self) -> u16 {
-        self.read_word_cpu(self.pc.wrapping_add(1)).wrapping_add(self.y as u16)
-    }
-
-    fn indirect_x(&self) -> u16 {
-        let base = self.read_cpu(self.pc.wrapping_add(1)).wrapping_add(self.x);
-        let lo = self.read_cpu(base as u16);
-        let hi = self.read_cpu(base.wrapping_add(1) as u16);
-        ((hi as u16) << 8) | (lo as u16)
-    }
-
-    fn indirect_y(&self) -> u16 {
-        let base = self.read_cpu(self.pc.wrapping_add(1));
-        let lo = self.read_cpu(base as u16);
-        let hi = self.read_cpu(base.wrapping_add(1) as u16);
-        (((hi as u16) << 8) | (lo as u16)).wrapping_add(self.y as u16)
-    }
-
-    fn indirect(&self) -> u16 {
-        let ptr = self.read_word_cpu(self.pc.wrapping_add(1));
-        let lo = self.read_cpu(ptr);
-        let hi = self.read_cpu((ptr & 0xFF00) | ((ptr + 1) & 0x00FF));
-        ((hi as u16) << 8) | (lo as u16)
-    }
-
+    /// Compatibility helper: directly load A with an immediate value and update flags.
     pub fn lda_immediate(&mut self, value: u8) {
-        self.a = value;
-        self.update_zero_and_negative_flags(self.a);
+        self.lda(value);
     }
 
-    fn lda_absolute(&mut self, addr: u16) {
-        self.a = self.read(addr);
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    fn lda_zero_page(&mut self, addr: u16) {
-        self.a = self.read(addr);
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    fn lda_zero_page_x(&mut self, addr: u16) {
-        self.a = self.read(addr);
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    fn lda_absolute_x(&mut self, addr: u16) {
-        self.a = self.read(addr);
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    fn lda_absolute_y(&mut self, addr: u16) {
-        self.a = self.read(addr);
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    fn lda_indirect_x(&mut self, addr: u16) {
-        self.a = self.read(addr);
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    fn lda_indirect_y(&mut self, addr: u16) {
-        self.a = self.read(addr);
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    pub fn ldx_immediate(&mut self, value: u8) {
-        self.x = value;
-        self.update_zero_and_negative_flags(self.x);
-    }
-
-    fn ldx_zero_page(&mut self, addr: u16) {
-        self.x = self.read(addr);
-        self.update_zero_and_negative_flags(self.x);
-    }
-
-    fn ldx_zero_page_y(&mut self, addr: u16) {
-        self.x = self.read(addr);
-        self.update_zero_and_negative_flags(self.x);
-    }
-
-    fn ldx_absolute(&mut self, addr: u16) {
-        self.x = self.read(addr);
-        self.update_zero_and_negative_flags(self.x);
-    }
-
-    fn ldx_absolute_y(&mut self, addr: u16) {
-        self.x = self.read(addr);
-        self.update_zero_and_negative_flags(self.x);
-    }
-
-    pub fn ldy_immediate(&mut self, value: u8) {
-        self.y = value;
-        self.update_zero_and_negative_flags(self.y);
-    }
-
-    fn ldy_zero_page(&mut self, addr: u16) {
-        self.y = self.read(addr);
-        self.update_zero_and_negative_flags(self.y);
-    }
-
-    fn ldy_zero_page_x(&mut self, addr: u16) {
-        self.y = self.read(addr);
-        self.update_zero_and_negative_flags(self.y);
-    }
-
-    fn ldy_absolute(&mut self, addr: u16) {
-        self.y = self.read(addr);
-        self.update_zero_and_negative_flags(self.y);
-    }
-
-    fn ldy_absolute_x(&mut self, addr: u16) {
-        self.y = self.read(addr);
-        self.update_zero_and_negative_flags(self.y);
-    }
-
-    pub fn sta(&mut self, addr: u16) {
-        self.write(addr, self.a);
-    }
-
-    pub fn stx(&mut self, addr: u16) {
-        self.write(addr, self.x);
-    }
-
-    pub fn sty(&mut self, addr: u16) {
-        self.write(addr, self.y);
-    }
-
-    pub fn tax(&mut self) {
-        self.x = self.a;
-        self.update_zero_and_negative_flags(self.x);
-    }
-
-    pub fn tay(&mut self) {
-        self.y = self.a;
-        self.update_zero_and_negative_flags(self.y);
-    }
-
-    pub fn txa(&mut self) {
-        self.a = self.x;
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    pub fn tya(&mut self) {
-        self.a = self.y;
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    pub fn tsx(&mut self) {
-        self.x = self.sp;
-        self.update_zero_and_negative_flags(self.x);
-    }
-
-    pub fn txs(&mut self) {
-        self.sp = self.x;
-    }
-
-    pub fn adc(&mut self, value: u8) {
-        let a = self.a as u16;
-        let v = value as u16;
-        let c = (self.status & CARRY) as u16;
-        let result = a + v + c;
-
-        self.clear_status_flag(CARRY);
-        if result > 0xFF {
-            self.set_status_flag(CARRY);
-        }
-
-        let overflow = ((a ^ result) & (v ^ result) & 0x80) != 0;
-        if overflow {
-            self.set_status_flag(OVERFLOW);
-        } else {
-            self.clear_status_flag(OVERFLOW);
-        }
-
-        self.a = result as u8;
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    pub fn sbc(&mut self, value: u8) {
-        let a = self.a as u16;
-        let v = value as u16;
-        let c = (self.status & CARRY) as u16;
-        let result = a.wrapping_sub(v).wrapping_sub(1 - c);
-
-        self.clear_status_flag(CARRY);
-        if result <= 0xFF {
-            self.set_status_flag(CARRY);
-        }
-
-        let overflow = ((a ^ v) & (a ^ result) & 0x80) != 0;
-        if overflow {
-            self.set_status_flag(OVERFLOW);
-        } else {
-            self.clear_status_flag(OVERFLOW);
-        }
-
-        self.a = result as u8;
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    pub fn pha(&mut self) {
-        self.push(self.a);
-    }
-
-    pub fn pla(&mut self) {
-        self.a = self.pop();
-        self.update_zero_and_negative_flags(self.a);
-    }
-
-    pub fn php(&mut self) {
-        let status_with_b_and_u_flags = self.status | 0b0011_0000;
-        self.push(status_with_b_and_u_flags);
-    }
-
-    pub fn plp(&mut self) {
-        let pulled_status = self.pop();
-        let unused_flag_mask = !0b0010_0000;
-        self.status = (self.status & unused_flag_mask) | (pulled_status & !unused_flag_mask);
-    }
-
-    fn read_cpu(&self, addr: u16) -> u8 {
-        *self.memory.get(addr as usize).unwrap_or(&0)
-    }
-
-    pub fn read(&mut self, addr: u16) -> u8 {
-        match addr {
-            0x2000..=0x2007 => self.ppu.read(addr),
-            _ => self.read_cpu(addr),
+    /// Trigger an IRQ (if not masked).
+    pub fn irq(&mut self, bus: &mut Bus) {
+        if !self.get_flag(IRQ_DISABLE) {
+            self.push_word(self.pc, bus);
+            self.push_status_with_break(false, bus); // B=0 for IRQ/NMI pushes
+            self.set_flag(IRQ_DISABLE, true);
+            self.pc = bus.read_word(0xFFFE);
         }
     }
 
-    pub fn write(&mut self, addr: u16, data: u8) {
-        match addr {
-            0x2000..=0x2007 => self.ppu.write(addr, data),
-            _ => self.memory[addr as usize] = data,
-        }
+    /// Trigger an NMI (non-maskable interrupt).
+    pub fn nmi(&mut self, bus: &mut Bus) {
+        self.push_word(self.pc, bus);
+        self.push_status_with_break(false, bus); // B=0 for IRQ/NMI pushes
+        self.set_flag(IRQ_DISABLE, true);
+        self.pc = bus.read_word(0xFFFA);
     }
 
-    fn read_word_cpu(&self, addr: u16) -> u16 {
-        let lo = self.read_cpu(addr) as u16;
-        let hi = self.read_cpu(addr.wrapping_add(1)) as u16;
+    /// Return from interrupt.
+    pub fn rti(&mut self, bus: &mut Bus) {
+        self.plp(bus);
+        self.pc = self.pop_word(bus);
+    }
+
+    // ------------------------
+    // Addressing helpers
+    // ------------------------
+
+    #[inline]
+    fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
+        let v = bus.read(self.pc);
+        self.pc = self.pc.wrapping_add(1);
+        v
+    }
+
+    #[inline]
+    fn fetch_word(&mut self, bus: &mut Bus) -> u16 {
+        let lo = self.fetch_byte(bus) as u16;
+        let hi = self.fetch_byte(bus) as u16;
         (hi << 8) | lo
     }
 
-    pub fn read_word(&mut self, addr: u16) -> u16 {
-        let lo = self.read(addr) as u16;
-        let hi = self.read(addr.wrapping_add(1)) as u16;
+    #[inline]
+    fn addr_zp(&mut self, bus: &mut Bus) -> u16 {
+        self.fetch_byte(bus) as u16
+    }
+
+    #[inline]
+    fn addr_zp_x(&mut self, bus: &mut Bus) -> u16 {
+        self.fetch_byte(bus).wrapping_add(self.x) as u16
+    }
+
+    #[inline]
+    fn addr_zp_y(&mut self, bus: &mut Bus) -> u16 {
+        self.fetch_byte(bus).wrapping_add(self.y) as u16
+    }
+
+    #[inline]
+    fn addr_abs(&mut self, bus: &mut Bus) -> u16 {
+        self.fetch_word(bus)
+    }
+
+    #[inline]
+    fn addr_abs_x(&mut self, bus: &mut Bus) -> u16 {
+        self.fetch_word(bus).wrapping_add(self.x as u16)
+    }
+
+    #[inline]
+    fn addr_abs_y(&mut self, bus: &mut Bus) -> u16 {
+        self.fetch_word(bus).wrapping_add(self.y as u16)
+    }
+
+    #[inline]
+    fn addr_ind_x(&mut self, bus: &mut Bus) -> u16 {
+        let zp = self.fetch_byte(bus).wrapping_add(self.x);
+        self.read_word_zp(bus, zp)
+    }
+
+    #[inline]
+    fn addr_ind_y(&mut self, bus: &mut Bus) -> u16 {
+        let zp = self.fetch_byte(bus);
+        self.read_word_zp(bus, zp).wrapping_add(self.y as u16)
+    }
+
+    #[inline]
+    fn addr_abs_x_pc(&mut self, bus: &mut Bus) -> (u16, bool) {
+        let base = self.fetch_word(bus);
+        let addr = base.wrapping_add(self.x as u16);
+        let crossed = (base & 0xFF00) != (addr & 0xFF00);
+        (addr, crossed)
+    }
+
+    #[inline]
+    fn addr_abs_y_pc(&mut self, bus: &mut Bus) -> (u16, bool) {
+        let base = self.fetch_word(bus);
+        let addr = base.wrapping_add(self.y as u16);
+        let crossed = (base & 0xFF00) != (addr & 0xFF00);
+        (addr, crossed)
+    }
+
+    #[inline]
+    fn addr_ind_y_pc(&mut self, bus: &mut Bus) -> (u16, bool) {
+        let zp = self.fetch_byte(bus);
+        let base = self.read_word_zp(bus, zp);
+        let addr = base.wrapping_add(self.y as u16);
+        let crossed = (base & 0xFF00) != (addr & 0xFF00);
+        (addr, crossed)
+    }
+
+    #[inline]
+    fn read_word_zp(&mut self, bus: &mut Bus, ptr: u8) -> u16 {
+        let lo = bus.read(ptr as u16) as u16;
+        let hi = bus.read(((ptr as u16 + 1) & 0x00FF) as u16) as u16;
         (hi << 8) | lo
     }
 
-    pub fn write_word(&mut self, addr: u16, data: u16) {
-        let lo = data as u8;
-        let hi = (data >> 8) as u8;
-        self.write(addr, lo);
-        self.write(addr.wrapping_add(1), hi);
+    // 6502 JMP (indirect) page-boundary bug
+    #[inline]
+    fn read_word_indirect_bug(&mut self, bus: &mut Bus, addr: u16) -> u16 {
+        let lo = bus.read(addr) as u16;
+        let hi_addr = (addr & 0xFF00) | ((addr + 1) & 0x00FF);
+        let hi = bus.read(hi_addr) as u16;
+        (hi << 8) | lo
     }
 
-    pub fn push(&mut self, data: u8) {
-        self.write(0x0100 + self.sp as u16, data);
+    #[inline]
+    fn branch(&mut self, offset: i8) {
+        let new_pc = (self.pc as i16).wrapping_add(offset as i16) as u16;
+        self.pc = new_pc;
+    }
+
+    // ------------------------
+    // Stack operations
+    // ------------------------
+    #[inline]
+    fn push(&mut self, v: u8, bus: &mut Bus) {
+        let addr = 0x0100u16 | self.sp as u16;
+        bus.write(addr, v);
         self.sp = self.sp.wrapping_sub(1);
     }
 
-    pub fn pop(&mut self) -> u8 {
+    #[inline]
+    fn pop(&mut self, bus: &mut Bus) -> u8 {
         self.sp = self.sp.wrapping_add(1);
-        self.read(0x0100 + self.sp as u16)
+        let addr = 0x0100u16 | self.sp as u16;
+        bus.read(addr)
     }
 
-    pub fn push_word(&mut self, data: u16) {
-        self.push((data >> 8) as u8);
-        self.push(data as u8);
+    #[inline]
+    fn push_word(&mut self, v: u16, bus: &mut Bus) {
+        self.push((v >> 8) as u8, bus);
+        self.push((v & 0xFF) as u8, bus);
     }
 
-    pub fn pop_word(&mut self) -> u16 {
-        let lo = self.pop() as u16;
-        let hi = self.pop() as u16;
+    #[inline]
+    fn pop_word(&mut self, bus: &mut Bus) -> u16 {
+        let lo = self.pop(bus) as u16;
+        let hi = self.pop(bus) as u16;
         (hi << 8) | lo
     }
 
-    pub fn dec(&mut self, addr: u16) {
-        let value = self.read(addr).wrapping_sub(1);
-        self.write(addr, value);
-        self.update_zero_and_negative_flags(value);
+    // Push P with control over Break bit on push (for IRQ/NMI/BRK differences).
+    fn push_status_with_break(&mut self, set_break_on_push: bool, bus: &mut Bus) {
+        let mut v = self.status | UNUSED;
+        if set_break_on_push {
+            v |= BREAK;
+        } else {
+            v &= !BREAK;
+        }
+        self.push(v, bus);
     }
 
-    pub fn dex(&mut self) {
-        self.x = self.x.wrapping_sub(1);
-        self.update_zero_and_negative_flags(self.x);
+    fn php(&mut self, bus: &mut Bus) {
+        self.push_status_with_break(true, bus);
     }
 
-    pub fn dey(&mut self) {
-        self.y = self.y.wrapping_sub(1);
-        self.update_zero_and_negative_flags(self.y);
+    fn plp(&mut self, bus: &mut Bus) {
+        let v = self.pop(bus);
+        // Ensure bit 5 is set and bit 4 (B) is cleared in P (only set when pushed)
+        self.status = (v | UNUSED) & !BREAK;
     }
 
-    pub fn inc(&mut self, addr: u16) {
-        let value = self.read(addr).wrapping_add(1);
-        self.write(addr, value);
-        self.update_zero_and_negative_flags(value);
+    fn pha(&mut self, bus: &mut Bus) {
+        self.push(self.a, bus);
     }
 
-    pub fn inx(&mut self) {
+    fn pla(&mut self, bus: &mut Bus) {
+        self.a = self.pop(bus);
+        self.update_zn(self.a);
+    }
+
+    // ------------------------
+    // Flags
+    // ------------------------
+    #[inline]
+    fn set_flag(&mut self, mask: u8, on: bool) {
+        if on {
+            self.status |= mask;
+        } else {
+            self.status &= !mask;
+        }
+    }
+
+    #[inline]
+    fn get_flag(&self, mask: u8) -> bool {
+        (self.status & mask) != 0
+    }
+
+    #[inline]
+    fn update_zn(&mut self, v: u8) {
+        self.set_flag(ZERO, v == 0);
+        self.set_flag(NEGATIVE, (v & 0x80) != 0);
+    }
+
+    // ------------------------
+    // Core ALU and operations
+    // ------------------------
+    fn lda(&mut self, v: u8) {
+        self.a = v;
+        self.update_zn(self.a);
+    }
+
+    fn ldx(&mut self, v: u8) {
+        self.x = v;
+        self.update_zn(self.x);
+    }
+
+    fn ldy(&mut self, v: u8) {
+        self.y = v;
+        self.update_zn(self.y);
+    }
+
+    fn tax(&mut self) {
+        self.x = self.a;
+        self.update_zn(self.x);
+    }
+    fn tay(&mut self) {
+        self.y = self.a;
+        self.update_zn(self.y);
+    }
+    fn txa(&mut self) {
+        self.a = self.x;
+        self.update_zn(self.a);
+    }
+    fn tya(&mut self) {
+        self.a = self.y;
+        self.update_zn(self.a);
+    }
+    fn tsx(&mut self) {
+        self.x = self.sp;
+        self.update_zn(self.x);
+    }
+    fn txs(&mut self) {
+        self.sp = self.x;
+    } // flags unaffected
+
+    fn and(&mut self, v: u8) {
+        self.a &= v;
+        self.update_zn(self.a);
+    }
+    fn ora(&mut self, v: u8) {
+        self.a |= v;
+        self.update_zn(self.a);
+    }
+    fn eor(&mut self, v: u8) {
+        self.a ^= v;
+        self.update_zn(self.a);
+    }
+
+    fn bit(&mut self, v: u8) {
+        // Z set if (A & M) == 0; N and V taken from M
+        self.set_flag(ZERO, (self.a & v) == 0);
+        self.set_flag(NEGATIVE, (v & 0x80) != 0);
+        self.set_flag(OVERFLOW, (v & 0x40) != 0);
+    }
+
+    fn adc(&mut self, v: u8) {
+        let a = self.a;
+        let carry_in = if self.get_flag(CARRY) { 1 } else { 0 };
+        let sum16 = a as u16 + v as u16 + carry_in as u16;
+        let result = sum16 as u8;
+
+        self.set_flag(CARRY, sum16 > 0xFF);
+        self.set_flag(OVERFLOW, ((!(a ^ v)) & (a ^ result) & 0x80) != 0);
+
+        self.a = result;
+        self.update_zn(self.a);
+    }
+
+    fn sbc(&mut self, v: u8) {
+        // 6502 SBC is ADC of one's complement of v
+        self.adc(v ^ 0xFF);
+    }
+
+    fn cmp(&mut self, reg: u8, v: u8) {
+        self.set_flag(CARRY, reg >= v);
+        let r = reg.wrapping_sub(v);
+        self.update_zn(r);
+    }
+
+    // Increments/Decrements
+    fn inx(&mut self) {
         self.x = self.x.wrapping_add(1);
-        self.update_zero_and_negative_flags(self.x);
+        self.update_zn(self.x);
     }
-
-    pub fn iny(&mut self) {
+    fn iny(&mut self) {
         self.y = self.y.wrapping_add(1);
-        self.update_zero_and_negative_flags(self.y);
+        self.update_zn(self.y);
+    }
+    fn dex(&mut self) {
+        self.x = self.x.wrapping_sub(1);
+        self.update_zn(self.x);
+    }
+    fn dey(&mut self) {
+        self.y = self.y.wrapping_sub(1);
+        self.update_zn(self.y);
     }
 
-    pub fn and(&mut self, value: u8) {
-        self.a &= value;
-        self.update_zero_and_negative_flags(self.a);
+    fn inc_mem(&mut self, addr: u16, bus: &mut Bus) {
+        let v = self.rmw(bus, addr, |_, old| old.wrapping_add(1));
+        self.update_zn(v);
+    }
+    fn dec_mem(&mut self, addr: u16, bus: &mut Bus) {
+        let v = self.rmw(bus, addr, |_, old| old.wrapping_sub(1));
+        self.update_zn(v);
     }
 
-    pub fn eor(&mut self, value: u8) {
-        self.a ^= value;
-        self.update_zero_and_negative_flags(self.a);
+    // Shifts/Rotates - Accumulator
+    fn asl_acc(&mut self) {
+        let v = self.a;
+        self.set_flag(CARRY, (v & 0x80) != 0);
+        self.a = v << 1;
+        self.update_zn(self.a);
+    }
+    fn lsr_acc(&mut self) {
+        let v = self.a;
+        self.set_flag(CARRY, (v & 0x01) != 0);
+        self.a = v >> 1;
+        self.update_zn(self.a);
+    }
+    fn rol_acc(&mut self) {
+        let v = self.a;
+        let carry_in = if self.get_flag(CARRY) { 1 } else { 0 };
+        self.set_flag(CARRY, (v & 0x80) != 0);
+        self.a = (v << 1) | carry_in;
+        self.update_zn(self.a);
+    }
+    fn ror_acc(&mut self) {
+        let v = self.a;
+        let carry_in = if self.get_flag(CARRY) { 0x80 } else { 0 };
+        self.set_flag(CARRY, (v & 0x01) != 0);
+        self.a = (v >> 1) | carry_in;
+        self.update_zn(self.a);
     }
 
-    pub fn ora(&mut self, value: u8) {
-        self.a |= value;
-        self.update_zero_and_negative_flags(self.a);
+    // Shifts/Rotates - Memory
+    fn asl_mem(&mut self, addr: u16, bus: &mut Bus) {
+        // RMW sequence: read -> dummy write old -> write new, with micro-cycle ticks
+        let v = bus.read(addr);
+        bus.tick(1);
+        bus.write(addr, v); // dummy write of old value
+        bus.tick(1);
+        self.set_flag(CARRY, (v & 0x80) != 0);
+        let r = v << 1;
+        bus.write(addr, r);
+        self.update_zn(r);
+    }
+    fn lsr_mem(&mut self, addr: u16, bus: &mut Bus) {
+        // RMW sequence: read -> dummy write old -> write new, with micro-cycle ticks
+        let v = bus.read(addr);
+        bus.tick(1);
+        bus.write(addr, v); // dummy write of old value
+        bus.tick(1);
+        self.set_flag(CARRY, (v & 0x01) != 0);
+        let r = v >> 1;
+        bus.write(addr, r);
+        self.update_zn(r);
+    }
+    fn rol_mem(&mut self, addr: u16, bus: &mut Bus) {
+        // RMW sequence: read -> dummy write old -> write new, with micro-cycle ticks
+        let v = bus.read(addr);
+        bus.tick(1);
+        bus.write(addr, v); // dummy write of old value
+        bus.tick(1);
+        let carry_in = if self.get_flag(CARRY) { 1 } else { 0 };
+        self.set_flag(CARRY, (v & 0x80) != 0);
+        let r = (v << 1) | carry_in;
+        bus.write(addr, r);
+        self.update_zn(r);
+    }
+    fn ror_mem(&mut self, addr: u16, bus: &mut Bus) {
+        let r = self.rmw(bus, addr, |cpu, old| {
+            let carry_in = if cpu.get_flag(CARRY) { 0x80 } else { 0 };
+            cpu.set_flag(CARRY, (old & 0x01) != 0);
+            (old >> 1) | carry_in
+        });
+        self.update_zn(r);
     }
 
-    fn shift_left(&mut self, value: u8) -> u8 {
-        let result = value << 1;
-        if value & NEGATIVE != 0 {
-            self.set_status_flag(CARRY);
-        } else {
-            self.clear_status_flag(CARRY);
+    // ----- CPU helpers for penalties and RMW choreography -----
+
+    #[inline]
+    fn add_page_cross_penalty(&self, cycles: &mut u32, crossed: bool) {
+        if crossed {
+            *cycles += 1;
         }
-        self.update_zero_and_negative_flags(result);
-        result
     }
 
-    fn shift_right(&mut self, value: u8) -> u8 {
-        let result = value >> 1;
-        if value & CARRY != 0 {
-            self.set_status_flag(CARRY);
-        } else {
-            self.clear_status_flag(CARRY);
+    /// Branch helper: fetches displacement, applies branch if taken, and returns extra cycles (1 or 2).
+    fn branch_cond(&mut self, bus: &mut Bus, take: bool) -> u32 {
+        let offset = self.fetch_byte(bus) as i8;
+        if !take {
+            return 0;
         }
-        self.update_zero_and_negative_flags(result);
-        result
-    }
-
-    fn rotate_left(&mut self, value: u8) -> u8 {
-        let carry = self.status & CARRY;
-        let result = (value << 1) | carry;
-        if value & NEGATIVE != 0 {
-            self.set_status_flag(CARRY);
-        } else {
-            self.clear_status_flag(CARRY);
-        }
-        self.update_zero_and_negative_flags(result);
-        result
-    }
-
-    fn rotate_right(&mut self, value: u8) -> u8 {
-        let carry = self.status & CARRY;
-        let result = (value >> 1) | (carry << 7);
-        if value & CARRY != 0 {
-            self.set_status_flag(CARRY);
-        } else {
-            self.clear_status_flag(CARRY);
-        }
-        self.update_zero_and_negative_flags(result);
-        result
-    }
-
-    pub fn asl(&mut self, addr: u16) {
-        let value = self.read(addr);
-        let result = self.shift_left(value);
-        self.write(addr, result);
-    }
-
-    pub fn asl_acc(&mut self) {
-        self.a = self.shift_left(self.a);
-    }
-
-    pub fn lsr(&mut self, addr: u16) {
-        let value = self.read(addr);
-        let result = self.shift_right(value);
-        self.write(addr, result);
-    }
-
-    pub fn lsr_acc(&mut self) {
-        self.a = self.shift_right(self.a);
-    }
-
-    pub fn rol(&mut self, addr: u16) {
-        let value = self.read(addr);
-        let result = self.rotate_left(value);
-        self.write(addr, result);
-    }
-
-    pub fn rol_acc(&mut self) {
-        self.a = self.rotate_left(self.a);
-    }
-
-    pub fn ror(&mut self, addr: u16) {
-        let value = self.read(addr);
-        let result = self.rotate_right(value);
-        self.write(addr, result);
-    }
-
-    pub fn ror_acc(&mut self) {
-        self.a = self.rotate_right(self.a);
-    }
-
-    pub fn clc(&mut self) {
-        self.clear_status_flag(CARRY);
-    }
-
-    pub fn cli(&mut self) {
-        self.clear_status_flag(INTERRUPT_DISABLE);
-    }
-
-    pub fn clv(&mut self) {
-        self.clear_status_flag(OVERFLOW);
-    }
-
-    pub fn sec(&mut self) {
-        self.set_status_flag(CARRY);
-    }
-
-    pub fn sei(&mut self) {
-        self.set_status_flag(INTERRUPT_DISABLE);
-    }
-
-    pub fn sed(&mut self) {
-        self.set_status_flag(0b0000_1000);
-    }
-
-    pub fn cld(&mut self) {
-        self.clear_status_flag(0b0000_1000);
-    }
-
-    pub fn cmp(&mut self, value: u8) {
-        if self.a >= value {
-            self.set_status_flag(CARRY);
-        } else {
-            self.clear_status_flag(CARRY);
-        }
-        let result = self.a.wrapping_sub(value);
-        self.update_zero_and_negative_flags(result);
-    }
-
-    pub fn cpx(&mut self, value: u8) {
-        if self.x >= value {
-            self.set_status_flag(CARRY);
-        } else {
-            self.clear_status_flag(CARRY);
-        }
-        let result = self.x.wrapping_sub(value);
-        self.update_zero_and_negative_flags(result);
-    }
-
-    pub fn cpy(&mut self, value: u8) {
-        if self.y >= value {
-            self.set_status_flag(CARRY);
-        } else {
-            self.clear_status_flag(CARRY);
-        }
-        let result = self.y.wrapping_sub(value);
-        self.update_zero_and_negative_flags(result);
-    }
-
-    pub fn branch(&mut self, offset: u8) -> u8 {
-        let offset = offset as i8 as i16;
         let old_pc = self.pc;
-        self.pc = self.pc.wrapping_add(offset as u16);
-        1 + if (old_pc & 0xFF00) != (self.pc & 0xFF00) { 1 } else { 0 }
-    }
-
-    pub fn bcc(&mut self, offset: u8) -> u8 {
-        if !self.is_status_flag_set(CARRY) {
-            self.branch(offset)
-        } else {
-            0
+        self.branch(offset);
+        let mut extra = 1;
+        if (old_pc & 0xFF00) != (self.pc & 0xFF00) {
+            extra += 1;
         }
+        extra
     }
 
-    pub fn bcs(&mut self, offset: u8) -> u8 {
-        if self.is_status_flag_set(CARRY) {
-            self.branch(offset)
-        } else {
-            0
-        }
+    /// Read-Modify-Write bus choreography: read -> dummy write old -> write new. Returns final value.
+    fn rmw<F>(&mut self, bus: &mut Bus, addr: u16, transform: F) -> u8
+    where
+        F: FnOnce(&mut Self, u8) -> u8,
+    {
+        let old = bus.read(addr);
+        bus.tick(1);
+        bus.write(addr, old);
+        bus.tick(1);
+        let newv = transform(self, old);
+        bus.write(addr, newv);
+        newv
     }
 
-    pub fn beq(&mut self, offset: u8) -> u8 {
-        if self.is_status_flag_set(ZERO) {
-            self.branch(offset)
-        } else {
-            0
-        }
-    }
-
-    pub fn bmi(&mut self, offset: u8) -> u8 {
-        if self.is_status_flag_set(NEGATIVE) {
-            self.branch(offset)
-        } else {
-            0
-        }
-    }
-
-    pub fn bne(&mut self, offset: u8) -> u8 {
-        if !self.is_status_flag_set(ZERO) {
-            self.branch(offset)
-        } else {
-            0
-        }
-    }
-
-    pub fn bpl(&mut self, offset: u8) -> u8 {
-        if !self.is_status_flag_set(NEGATIVE) {
-            self.branch(offset)
-        } else {
-            0
-        }
-    }
-
-    pub fn bvc(&mut self, offset: u8) -> u8 {
-        if !self.is_status_flag_set(OVERFLOW) {
-            self.branch(offset)
-        } else {
-            0
-        }
-    }
-
-    pub fn bvs(&mut self, offset: u8) -> u8 {
-        if self.is_status_flag_set(OVERFLOW) {
-            self.branch(offset)
-        } else {
-            0
-        }
-    }
-
-    pub fn jmp(&mut self, addr: u16) {
-        self.pc = addr;
-    }
-
-    pub fn jsr(&mut self, addr: u16) {
-        let return_addr = self.pc.wrapping_sub(1);
-        self.push_word(return_addr);
-        self.pc = addr;
-    }
-
-    pub fn rts(&mut self) {
-        self.pc = self.pop_word().wrapping_add(1);
-    }
-
-    pub fn brk(&mut self) {
-        self.push_word(self.pc);
-        self.php();
-        self.sei();
-        self.pc = self.read_word(0xFFFE);
-    }
-
-    pub fn rti(&mut self) {
-        self.plp();
-        self.pc = self.pop_word();
-    }
-
-    pub fn nmi(&mut self) {
-        println!("NMI triggered - PC: {:#06x}", self.pc);
-        self.push_word(self.pc);
-        self.php();
-        self.sei();
-        self.pc = self.read_word(0xFFFA);
-    }
-
-    pub fn irq(&mut self) {
-        if !self.is_status_flag_set(INTERRUPT_DISABLE) {
-            self.push_word(self.pc);
-            self.php();
-            self.sei();
-            self.pc = self.read_word(0xFFFE);
-        }
-    }
-
-    pub fn bit(&mut self, value: u8) {
-        if self.a & value == 0 {
-            self.set_status_flag(ZERO);
-        } else {
-            self.clear_status_flag(ZERO);
-        }
-        if value & NEGATIVE != 0 {
-            self.set_status_flag(NEGATIVE);
-        } else {
-            self.clear_status_flag(NEGATIVE);
-        }
-        if value & OVERFLOW != 0 {
-            self.set_status_flag(OVERFLOW);
-        } else {
-            self.clear_status_flag(OVERFLOW);
-        }
-    }
-
-    pub fn nop(&mut self) {
-        // Do nothing
-    }
-
-    pub fn step(&mut self) {
-    let opcode = self.read_cpu(self.pc);
-    
-    println!(
-        "PC: {:#06x}, Opcode: {:#04x}, A: {:#04x}, X: {:#04x}, Y: {:#04x}, SP: {:#04x}, Status: {:#04x}, PPU Ctrl: {:#04x}, Mask: {:#04x}, Scanline: {}, Dot: {}",
-        self.pc, opcode, self.a, self.x, self.y, self.sp, self.status, self.ppu.ctrl(), self.ppu.mask(), self.ppu.scanline(), self.ppu.dot());
-    let pc_increment;
-    let cycles;
-    match opcode {
-        0xA9 => { let val = self.immediate(); self.lda_immediate(val); pc_increment = 2; cycles = 2; }
-        0xA5 => { let addr = self.zero_page(); self.lda_zero_page(addr); pc_increment = 2; cycles = 3; }
-        0xAD => { let addr = self.absolute(); self.lda_absolute(addr); pc_increment = 3; cycles = 4; }
-        0xB5 => { let addr = self.zero_page_x(); self.lda_zero_page_x(addr); pc_increment = 2; cycles = 4; }
-        0xBD => { let addr = self.absolute_x(); self.lda_absolute_x(addr); pc_increment = 3; cycles = 4; }
-        0xB9 => { let addr = self.absolute_y(); self.lda_absolute_y(addr); pc_increment = 3; cycles = 4; }
-        0xA1 => { let addr = self.indirect_x(); self.lda_indirect_x(addr); pc_increment = 2; cycles = 6; }
-        0xB1 => { let addr = self.indirect_y(); self.lda_indirect_y(addr); pc_increment = 2; cycles = 5; }
-        0xA2 => { let val = self.immediate(); self.ldx_immediate(val); pc_increment = 2; cycles = 2; }
-        0xA6 => { let addr = self.zero_page(); self.ldx_zero_page(addr); pc_increment = 2; cycles = 3; }
-        0xB6 => { let addr = self.zero_page_y(); self.ldx_zero_page_y(addr); pc_increment = 2; cycles = 4; }
-        0xAE => { let addr = self.absolute(); self.ldx_absolute(addr); pc_increment = 3; cycles = 4; }
-        0xBE => { let addr = self.absolute_y(); self.ldx_absolute_y(addr); pc_increment = 3; cycles = 4; }
-        0xA0 => { let val = self.immediate(); self.ldy_immediate(val); pc_increment = 2; cycles = 2; }
-        0xA4 => { let addr = self.zero_page(); self.ldy_zero_page(addr); pc_increment = 2; cycles = 3; }
-        0xB4 => { let addr = self.zero_page_x(); self.ldy_zero_page_x(addr); pc_increment = 2; cycles = 4; }
-        0xAC => { let addr = self.absolute(); self.ldy_absolute(addr); pc_increment = 3; cycles = 4; }
-        0xBC => { let addr = self.absolute_x(); self.ldy_absolute_x(addr); pc_increment = 3; cycles = 4; }
-        0x85 => { let addr = self.zero_page(); self.sta(addr); pc_increment = 2; cycles = 3; }
-        0x8D => { let addr = self.absolute(); self.sta(addr); pc_increment = 3; cycles = 4; }
-        0x95 => { let addr = self.zero_page_x(); self.sta(addr); pc_increment = 2; cycles = 4; }
-        0x9D => { let addr = self.absolute_x(); self.sta(addr); pc_increment = 3; cycles = 5; }
-        0x99 => { let addr = self.absolute_y(); self.sta(addr); pc_increment = 3; cycles = 5; }
-        0x81 => { let addr = self.indirect_x(); self.sta(addr); pc_increment = 2; cycles = 6; }
-        0x91 => { let addr = self.indirect_y(); self.sta(addr); pc_increment = 2; cycles = 6; }
-        0x86 => { let addr = self.zero_page(); self.stx(addr); pc_increment = 2; cycles = 3; }
-        0x96 => { let addr = self.zero_page_y(); self.stx(addr); pc_increment = 2; cycles = 4; }
-        0x8E => { let addr = self.absolute(); self.stx(addr); pc_increment = 3; cycles = 4; }
-        0x84 => { let addr = self.zero_page(); self.sty(addr); pc_increment = 2; cycles = 3; }
-        0x94 => { let addr = self.zero_page_x(); self.sty(addr); pc_increment = 2; cycles = 4; }
-        0x8C => { let addr = self.absolute(); self.sty(addr); pc_increment = 3; cycles = 4; }
-        0xAA => { self.tax(); pc_increment = 1; cycles = 2; }
-        0xA8 => { self.tay(); pc_increment = 1; cycles = 2; }
-        0x8A => { self.txa(); pc_increment = 1; cycles = 2; }
-        0x98 => { self.tya(); pc_increment = 1; cycles = 2; }
-        0xBA => { self.tsx(); pc_increment = 1; cycles = 2; }
-        0x9A => { self.txs(); pc_increment = 1; cycles = 2; }
-        0x69 => { let val = self.immediate(); self.adc(val); pc_increment = 2; cycles = 2; }
-        0x65 => { let addr = self.zero_page(); let val = self.read(addr); self.adc(val); pc_increment = 2; cycles = 3; }
-        0x75 => { let addr = self.zero_page_x(); let val = self.read(addr); self.adc(val); pc_increment = 2; cycles = 4; }
-        0x6D => { let addr = self.absolute(); let val = self.read(addr); self.adc(val); pc_increment = 3; cycles = 4; }
-        0x7D => { let addr = self.absolute_x(); let val = self.read(addr); self.adc(val); pc_increment = 3; cycles = 4; }
-        0x79 => { let addr = self.absolute_y(); let val = self.read(addr); self.adc(val); pc_increment = 3; cycles = 4; }
-        0x61 => { let addr = self.indirect_x(); let val = self.read(addr); self.adc(val); pc_increment = 2; cycles = 6; }
-        0x71 => { let addr = self.indirect_y(); let val = self.read(addr); self.adc(val); pc_increment = 2; cycles = 5; }
-        0xE9 => { let val = self.immediate(); self.sbc(val); pc_increment = 2; cycles = 2; }
-        0xE5 => { let addr = self.zero_page(); let val = self.read(addr); self.sbc(val); pc_increment = 2; cycles = 3; }
-        0xF5 => { let addr = self.zero_page_x(); let val = self.read(addr); self.sbc(val); pc_increment = 2; cycles = 4; }
-        0xED => { let addr = self.absolute(); let val = self.read(addr); self.sbc(val); pc_increment = 3; cycles = 4; }
-        0xFD => { let addr = self.absolute_x(); let val = self.read(addr); self.sbc(val); pc_increment = 3; cycles = 4; }
-        0xF9 => { let addr = self.absolute_y(); let val = self.read(addr); self.sbc(val); pc_increment = 3; cycles = 4; }
-        0xE1 => { let addr = self.indirect_x(); let val = self.read(addr); self.sbc(val); pc_increment = 2; cycles = 6; }
-        0xF1 => { let addr = self.indirect_y(); let val = self.read(addr); self.sbc(val); pc_increment = 2; cycles = 5; }
-        0x48 => { self.pha(); pc_increment = 1; cycles = 3; }
-        0x68 => { self.pla(); pc_increment = 1; cycles = 4; }
-        0x08 => { self.php(); pc_increment = 1; cycles = 3; }
-        0x28 => { self.plp(); pc_increment = 1; cycles = 4; }
-        0xC6 => { let addr = self.zero_page(); self.dec(addr); pc_increment = 2; cycles = 5; }
-        0xD6 => { let addr = self.zero_page_x(); self.dec(addr); pc_increment = 2; cycles = 6; }
-        0xCE => { let addr = self.absolute(); self.dec(addr); pc_increment = 3; cycles = 6; }
-        0xDE => { let addr = self.absolute_x(); self.dec(addr); pc_increment = 3; cycles = 7; }
-        0xCA => { self.dex(); pc_increment = 1; cycles = 2; }
-        0x88 => { self.dey(); pc_increment = 1; cycles = 2; }
-        0xE6 => { let addr = self.zero_page(); self.inc(addr); pc_increment = 2; cycles = 5; }
-        0xF6 => { let addr = self.zero_page_x(); self.inc(addr); pc_increment = 2; cycles = 6; }
-        0xEE => { let addr = self.absolute(); self.inc(addr); pc_increment = 3; cycles = 6; }
-        0xFE => { let addr = self.absolute_x(); self.inc(addr); pc_increment = 3; cycles = 7; }
-        0xE8 => { self.inx(); pc_increment = 1; cycles = 2; }
-        0xC8 => { self.iny(); pc_increment = 1; cycles = 2; }
-        0x29 => { let val = self.immediate(); self.and(val); pc_increment = 2; cycles = 2; }
-        0x25 => { let addr = self.zero_page(); let val = self.read(addr); self.and(val); pc_increment = 2; cycles = 3; }
-        0x35 => { let addr = self.zero_page_x(); let val = self.read(addr); self.and(val); pc_increment = 2; cycles = 4; }
-        0x2D => { let addr = self.absolute(); let val = self.read(addr); self.and(val); pc_increment = 3; cycles = 4; }
-        0x3D => { let addr = self.absolute_x(); let val = self.read(addr); self.and(val); pc_increment = 3; cycles = 4; }
-        0x39 => { let addr = self.absolute_y(); let val = self.read(addr); self.and(val); pc_increment = 3; cycles = 4; }
-        0x21 => { let addr = self.indirect_x(); let val = self.read(addr); self.and(val); pc_increment = 2; cycles = 6; }
-        0x31 => { let addr = self.indirect_y(); let val = self.read(addr); self.and(val); pc_increment = 2; cycles = 5; }
-        0x49 => { let val = self.immediate(); self.eor(val); pc_increment = 2; cycles = 2; }
-        0x45 => { let addr = self.zero_page(); let val = self.read(addr); self.eor(val); pc_increment = 2; cycles = 3; }
-        0x55 => { let addr = self.zero_page_x(); let val = self.read(addr); self.eor(val); pc_increment = 2; cycles = 4; }
-        0x4D => { let addr = self.absolute(); let val = self.read(addr); self.eor(val); pc_increment = 3; cycles = 4; }
-        0x5D => { let addr = self.absolute_x(); let val = self.read(addr); self.eor(val); pc_increment = 3; cycles = 4; }
-        0x59 => { let addr = self.absolute_y(); let val = self.read(addr); self.eor(val); pc_increment = 3; cycles = 4; }
-        0x41 => { let addr = self.indirect_x(); let val = self.read(addr); self.eor(val); pc_increment = 2; cycles = 6; }
-        0x51 => { let addr = self.indirect_y(); let val = self.read(addr); self.eor(val); pc_increment = 2; cycles = 5; }
-        0x09 => { let val = self.immediate(); self.ora(val); pc_increment = 2; cycles = 2; }
-        0x05 => { let addr = self.zero_page(); let val = self.read(addr); self.ora(val); pc_increment = 2; cycles = 3; }
-        0x15 => { let addr = self.zero_page_x(); let val = self.read(addr); self.ora(val); pc_increment = 2; cycles = 4; }
-        0x0D => { let addr = self.absolute(); let val = self.read(addr); self.ora(val); pc_increment = 3; cycles = 4; }
-        0x1D => { let addr = self.absolute_x(); let val = self.read(addr); self.ora(val); pc_increment = 3; cycles = 4; }
-        0x19 => { let addr = self.absolute_y(); let val = self.read(addr); self.ora(val); pc_increment = 3; cycles = 4; }
-        0x01 => { let addr = self.indirect_x(); let val = self.read(addr); self.ora(val); pc_increment = 2; cycles = 6; }
-        0x11 => { let addr = self.indirect_y(); let val = self.read(addr); self.ora(val); pc_increment = 2; cycles = 5; }
-        0x0A => { self.asl_acc(); pc_increment = 1; cycles = 2; }
-        0x06 => { let addr = self.zero_page(); self.asl(addr); pc_increment = 2; cycles = 5; }
-        0x16 => { let addr = self.zero_page_x(); self.asl(addr); pc_increment = 2; cycles = 6; }
-        0x0E => { let addr = self.absolute(); self.asl(addr); pc_increment = 3; cycles = 6; }
-        0x1E => { let addr = self.absolute_x(); self.asl(addr); pc_increment = 3; cycles = 7; }
-        0x4A => { self.lsr_acc(); pc_increment = 1; cycles = 2; }
-        0x46 => { let addr = self.zero_page(); self.lsr(addr); pc_increment = 2; cycles = 5; }
-        0x56 => { let addr = self.zero_page_x(); self.lsr(addr); pc_increment = 2; cycles = 6; }
-        0x4E => { let addr = self.absolute(); self.lsr(addr); pc_increment = 3; cycles = 6; }
-        0x5E => { let addr = self.absolute_x(); self.lsr(addr); pc_increment = 3; cycles = 7; }
-        0x2A => { self.rol_acc(); pc_increment = 1; cycles = 2; }
-        0x26 => { let addr = self.zero_page(); self.rol(addr); pc_increment = 2; cycles = 5; }
-        0x36 => { let addr = self.zero_page_x(); self.rol(addr); pc_increment = 2; cycles = 6; }
-        0x2E => { let addr = self.absolute(); self.rol(addr); pc_increment = 3; cycles = 6; }
-        0x3E => { let addr = self.absolute_x(); self.rol(addr); pc_increment = 3; cycles = 7; }
-        0x6A => { self.ror_acc(); pc_increment = 1; cycles = 2; }
-        0x66 => { let addr = self.zero_page(); self.ror(addr); pc_increment = 2; cycles = 5; }
-        0x76 => { let addr = self.zero_page_x(); self.ror(addr); pc_increment = 2; cycles = 6; }
-        0x6E => { let addr = self.absolute(); self.ror(addr); pc_increment = 3; cycles = 6; }
-        0x7E => { let addr = self.absolute_x(); self.ror(addr); pc_increment = 3; cycles = 7; }
-        0x18 => { self.clc(); pc_increment = 1; cycles = 2; }
-        0x58 => { self.cli(); pc_increment = 1; cycles = 2; }
-        0xB8 => { self.clv(); pc_increment = 1; cycles = 2; }
-        0x38 => { self.sec(); pc_increment = 1; cycles = 2; }
-        0x78 => { self.sei(); pc_increment = 1; cycles = 2; }
-        0xF8 => { self.sed(); pc_increment = 1; cycles = 2; }
-        0xD8 => { self.cld(); pc_increment = 1; cycles = 2; }
-        0xC9 => { let val = self.immediate(); self.cmp(val); pc_increment = 2; cycles = 2; }
-        0xC5 => { let addr = self.zero_page(); let val = self.read(addr); self.cmp(val); pc_increment = 2; cycles = 3; }
-        0xD5 => { let addr = self.zero_page_x(); let val = self.read(addr); self.cmp(val); pc_increment = 2; cycles = 4; }
-        0xCD => { let addr = self.absolute(); let val = self.read(addr); self.cmp(val); pc_increment = 3; cycles = 4; }
-        0xDD => { let addr = self.absolute_x(); let val = self.read(addr); self.cmp(val); pc_increment = 3; cycles = 4; }
-        0xD9 => { let addr = self.absolute_y(); let val = self.read(addr); self.cmp(val); pc_increment = 3; cycles = 4; }
-        0xC1 => { let addr = self.indirect_x(); let val = self.read(addr); self.cmp(val); pc_increment = 2; cycles = 6; }
-        0xD1 => { let addr = self.indirect_y(); let val = self.read(addr); self.cmp(val); pc_increment = 2; cycles = 5; }
-        0xE0 => { let val = self.immediate(); self.cpx(val); pc_increment = 2; cycles = 2; }
-        0xE4 => { let addr = self.zero_page(); let val = self.read(addr); self.cpx(val); pc_increment = 2; cycles = 3; }
-        0xEC => { let addr = self.absolute(); let val = self.read(addr); self.cpx(val); pc_increment = 3; cycles = 4; }
-        0xC0 => { let val = self.immediate(); self.cpy(val); pc_increment = 2; cycles = 2; }
-        0xC4 => { let addr = self.zero_page(); let val = self.read(addr); self.cpy(val); pc_increment = 2; cycles = 3; }
-        0xCC => { let addr = self.absolute(); let val = self.read(addr); self.cpy(val); pc_increment = 3; cycles = 4; }
-        0x90 => { let offset = self.immediate(); pc_increment = 2; cycles = 2 + self.bcc(offset); }
-        0xB0 => { let offset = self.immediate(); pc_increment = 2; cycles = 2 + self.bcs(offset); }
-        0xF0 => { let offset = self.immediate(); pc_increment = 2; cycles = 2 + self.beq(offset); }
-        0x30 => { let offset = self.immediate(); pc_increment = 2; cycles = 2 + self.bmi(offset); }
-        0xD0 => { let offset = self.immediate(); pc_increment = 2; cycles = 2 + self.bne(offset); }
-        0x10 => { let offset = self.immediate(); pc_increment = 2; cycles = 2 + self.bpl(offset); }
-        0x50 => { let offset = self.immediate(); pc_increment = 2; cycles = 2 + self.bvc(offset); }
-        0x70 => { let offset = self.immediate(); pc_increment = 2; cycles = 2 + self.bvs(offset); }
-        0x4C => { let addr = self.absolute(); self.jmp(addr); pc_increment = 3; cycles = 3; }
-        0x6C => { let addr = self.indirect(); self.jmp(addr); pc_increment = 3; cycles = 5; }
-        0x20 => { let addr = self.absolute(); self.jsr(addr); pc_increment = 3; cycles = 6; }
-        0x00 => { self.brk(); pc_increment = 2; cycles = 7; }
-        0x40 => { self.rti(); pc_increment = 1; cycles = 6; }
-        0x60 => { self.rts(); pc_increment = 1; cycles = 6; }
-        0x24 => { let addr = self.zero_page(); let val = self.read(addr); self.bit(val); pc_increment = 2; cycles = 3; }
-        0x2C => { let addr = self.absolute(); let val = self.read(addr); self.bit(val); pc_increment = 3; cycles = 4; }
-        0xEA => { self.nop(); pc_increment = 1; cycles = 2; }
-        _ => { println!("Unimplemented opcode: {:#04x} at PC: {:#06x}", opcode, self.pc); pc_increment = 1; cycles = 2; }
-    };
-    self.pc = self.pc.wrapping_add(pc_increment);
-    if self.ppu.step(cycles as usize) {
-        self.nmi();
-        println!("PPU NMI triggered, new PC: {:#06x}", self.pc);
+    #[inline]
+    fn is_rmw(opcode: u8) -> bool {
+        matches!(
+            opcode,
+            0x06 | 0x16 | 0x0E | 0x1E | // ASL zp,zpX,abs,absX
+            0x46 | 0x56 | 0x4E | 0x5E | // LSR zp,zpX,abs,absX
+            0x26 | 0x36 | 0x2E | 0x3E | // ROL zp,zpX,abs,absX
+            0x66 | 0x76 | 0x6E | 0x7E | // ROR zp,zpX,abs,absX
+            0xE6 | 0xF6 | 0xEE | 0xFE | // INC zp,zpX,abs,absX
+            0xC6 | 0xD6 | 0xCE | 0xDE // DEC zp,zpX,abs,absX
+        )
     }
 }
 
-    pub fn run(&mut self, cycles: usize) {
-        for _ in 0..cycles {
-            self.step();
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::Bus;
+    use crate::cartridge::Cartridge;
+    use crate::test_utils::build_nrom_with_prg;
+
+    // Use shared test utility for building NROM images with PRG and vectors
+
+    // Run a single instruction and return cycles consumed.
+    fn step_once(cpu: &mut Cpu6502, bus: &mut Bus) -> u32 {
+        cpu.step(bus)
     }
 
-    pub fn load_program(&mut self, program: &[u8], start_addr: u16) {
-        for (i, &byte) in program.iter().enumerate() {
-            self.write(start_addr + i as u16, byte);
+    #[test]
+    fn cycles_lda_abs_x_no_page_cross_is_4() {
+        // Program: LDX #$00; LDA $12FF,X; BRK
+        let prg = vec![0xA2, 0x00, 0xBD, 0xFF, 0x12, 0x00];
+        let rom = build_nrom_with_prg(&prg, 1, 1, None);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Put a value at $12FF that LDA will read
+        bus.write(0x12FF, 0x42);
+
+        let mut cpu = Cpu6502::new();
+        cpu.reset(&mut bus);
+
+        // LDX #$00
+        let c1 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c1, 2);
+
+        // LDA $12FF,X with X=0 (no page cross)
+        let c2 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c2, 4);
+
+        // BRK
+        let c3 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c3, 7);
+    }
+
+    #[test]
+    fn cycles_lda_abs_x_page_cross_is_5() {
+        // Program: LDX #$01; LDA $12FF,X; BRK
+        let prg = vec![0xA2, 0x01, 0xBD, 0xFF, 0x12, 0x00];
+        let rom = build_nrom_with_prg(&prg, 1, 1, None);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Value at $1300 (since $12FF+X crosses page)
+        bus.write(0x1300, 0x99);
+
+        let mut cpu = Cpu6502::new();
+        cpu.reset(&mut bus);
+
+        // LDX #$01
+        let c1 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c1, 2);
+
+        // LDA $12FF,X with X=1 (page cross)
+        let c2 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c2, 5);
+
+        // BRK
+        let c3 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c3, 7);
+    }
+
+    #[test]
+    fn cycles_sta_abs_x_no_penalty_is_5() {
+        // Program: LDA #$10; LDX #$01; STA $12FF,X; BRK
+        let prg = vec![0xA9, 0x10, 0xA2, 0x01, 0x9D, 0xFF, 0x12, 0x00];
+        let rom = build_nrom_with_prg(&prg, 1, 1, None);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        let mut cpu = Cpu6502::new();
+        cpu.reset(&mut bus);
+
+        // LDA #$10
+        let c1 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c1, 2);
+
+        // LDX #$01
+        let c2 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c2, 2);
+
+        // STA $12FF,X (abs,X store has fixed 5 cycles, no +1 penalty)
+        let c3 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c3, 5);
+
+        // BRK
+        let c4 = step_once(&mut cpu, &mut bus);
+        assert_eq!(c4, 7);
+
+        // Value landed at $1300
+        assert_eq!(bus.read(0x1300), 0x10);
+    }
+
+    #[test]
+    fn branch_cycles_taken_and_page_cross() {
+        // We'll place a branch at $80FF so a small positive offset crosses to $8101.
+        // Construct PRG with padding NOPs so that BCC resides at $80FF.
+        let mut prg = vec![];
+        // Fill up to $80FF - $8000 = 0x00FF bytes with NOPs
+        prg.extend(std::iter::repeat(0xEA).take(0x00FF));
+        // At $80FF: CLC (clear carry) so BCC will be taken
+        prg.push(0x18);
+        // Next at $8100: BCC +0x01 -> target $8103 (crosses page: from $8101 after fetch+inc)
+        prg.push(0x90);
+        prg.push(0x01);
+        // Filler then BRK at target
+        prg.push(0xEA); // at $8102
+        prg.push(0x00); // BRK at $8103
+
+        let rom = build_nrom_with_prg(&prg, 1, 1, None);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        let mut cpu = Cpu6502::new();
+        cpu.reset(&mut bus);
+
+        // Advance through NOP padding
+        for _ in 0..0x00FF {
+            let c = step_once(&mut cpu, &mut bus);
+            assert_eq!(c, 2);
         }
-        self.pc = start_addr;
+
+        // CLC
+        let c_clc = step_once(&mut cpu, &mut bus);
+        assert_eq!(c_clc, 2);
+
+        // BCC taken across page: expect 4 cycles (2 base +1 taken +1 page cross)
+        let c_bcc = step_once(&mut cpu, &mut bus);
+        assert_eq!(c_bcc, 4);
+
+        // BRK at target (after a NOP)
+        let _c_nop = step_once(&mut cpu, &mut bus);
+        let c_brk = step_once(&mut cpu, &mut bus);
+        assert_eq!(c_brk, 7);
     }
 }

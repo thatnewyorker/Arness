@@ -1,57 +1,140 @@
-# (WIP) Arness: NES Emulator in Rust
+# Arness: NES Emulator Core in Rust (WIP)
 
-Welcome to Arness, a high-performance Nintendo Entertainment System (NES) emulator written in Rust. Arness aims to provide an accurate and enjoyable emulation experience, focusing on compatibility, performance, and user-friendly features.
+Arness is a work-in-progress Nintendo Entertainment System (NES) emulator core written in Rust. The current focus is on correctness of the core components (CPU, bus, cartridge/mapper, basic PPU and APU stubs) with unit tests and a minimal demo runner. There is no graphics, audio, or input backend yet.
 
-## (Planned) Features
+## Status
 
-- **High Compatibility:** Runs a wide range of NES games with high accuracy.
-- **Optimized Performance:** Leverages Rust's efficiency to ensure smooth gameplay even on pitiful hardware.
-- **Save States:** Save your progress at any point and return to it instantly.
-- **Cross-Platform Support:** Works on Windows, macOS, and Linux.
-- **Customizable Controls:** Easily configure keyboard or gamepad inputs to your preference.
-- **Open Source:** Fully open-source under the MIT License. Contributions are welcome!
+Implemented
+- CPU: 6502 core with cycle counting for documented opcodes; targeted cycle and behavior tests
+- Bus: CPU memory map, RAM mirroring, PPU/APU register access, controllers, OAM DMA, simple timing (PPU ticks 3x per CPU tick)
+- PPU (stub): CPU-visible registers ($2000–$2007), simple VRAM + buffered reads, OAM, basic dot/scanline/frame timing, NMI on vblank
+- APU (stub): Register mirror, $4015 status, simple frame IRQ approximation; no audio output
+- Controllers: $4016/$4017 strobe and serial-read behavior
+- Cartridge: iNES v1 loader; NROM (mapper 0) only; CHR RAM allocated when CHR size is 0
+- Mapper: NROM implementation with PRG ROM mirroring and PRG RAM support
+- Shared test utils: iNES builders for consistent unit tests across modules
 
-## Getting Started
+Not yet implemented
+- Rendering or audio output
+- Input backends
+- Additional mappers beyond NROM
+- CLI to load external ROMs
+- Save states, configuration, or UI
 
-### Prerequisites
+## Repository layout
 
-- Rust (latest stable version)
-- SDL2 (for graphics and audio output)
+- src/
+  - apu.rs — APU register/status stub + frame IRQ approximation
+  - bus.rs — Bus and timing glue
+  - cartridge.rs — iNES v1 loader, NROM cartridge
+  - controller.rs — NES controller logic
+  - cpu6502.rs — CPU core
+  - lib.rs — Library exports
+  - main.rs — Demo runner (builds an in-memory NROM program and runs until one PPU frame)
+  - mapper.rs — Mapper trait + NROM implementation
+  - test_utils/ — Shared iNES builder helpers for tests
+- Cargo.toml
 
-### Installation
+## Prerequisites
 
-1. Clone the repository:
+- Rust (latest stable recommended)
 
-```bash
-git clone https://github.com/thatnewyorker/Arness.git
-cd arness
-cargo build --release
-cargo run --release path/to/your/game.rom
-```
+No external libraries (e.g., SDL2) are required at this stage.
 
-Replace path/to/your/game.rom with the path to the NES ROM file you wish to play.
+## Build
 
-Usage
+From the repository root:
 
-After launching a game, use the configured input methods to control the game. You can access the emulator settings and configure controls, video options, and more by editing the config.toml file (see Configuration section below).
-Configuration
+    cd Arness
+    cargo build
 
-Arness can be customized through a config.toml file located in the root directory. This file allows you to set various options related to video, audio, and input controls. See the config.example.toml file for a template and instructions.
+Or from the crate directory (this folder):
 
-Contributing
+    cargo build
 
-Contributions to Arness are warmly welcomed. Whether you're fixing bugs, adding new features, or improving documentation, your help is appreciated. Please check the CONTRIBUTING.md file for more details on how to contribute.
+## Run the demo
 
-License
+The included demo binary constructs an in-memory NROM image and runs the CPU/Bus until a single PPU frame (with a safety cap), then prints CPU registers and a memory location to stdout.
 
-Arness is released under the MIT License. See the LICENSE file for more details.
-Acknowledgments
+From the crate directory:
 
-    Thanks to all the contributors who have helped make Arness better.
-    Special thanks to the Rust programming community for their invaluable resources and support.
+    cargo run -q
 
-Disclaimer
+Expected: a short printout of CPU registers, flags, PC, SP, and a memory byte (e.g., mem[0x0200]).
 
-Arness is a project developed for educational purposes and personal use. It does not include any copyrighted Nintendo software or games. Users are responsible for obtaining NES ROMs from legal sources.
+## Run tests
 
-Enjoy your journey back to the classic NES era with Arness!
+Unit tests cover CPU cycle counts, bus behavior (mirroring, DMA, registers), PPU/Controller semantics, mapper behavior, and cartridge parsing.
+
+    cargo test -q
+
+## Library usage
+
+You can integrate the emulator core into your own program and drive it from a host loop. Example:
+
+    use arness::{Bus, Cartridge, Cpu6502};
+
+    fn main() -> Result<(), String> {
+        // Load an iNES v1 ROM (NROM/mapper 0 supported for now)
+        let cart = Cartridge::from_ines_file("path/to/game.nes")?;
+
+        // Create bus and attach cartridge
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Create CPU and reset
+        let mut cpu = Cpu6502::new();
+        cpu.reset(&mut bus);
+
+        // Run until one PPU frame (or a safety cap)
+        let mut instr_count = 0usize;
+        let max_instr = 1_000_000;
+        while instr_count < max_instr {
+            let _cycles = cpu.step(&mut bus);
+
+            // The Bus drives PPU/APU timing; break when a frame completes
+            if bus.ppu.take_frame_complete() {
+                break;
+            }
+            instr_count += 1;
+        }
+
+        Ok(())
+    }
+
+Notes
+- iNES 2.0 is detected and currently rejected.
+- Only NROM/mapper 0 is supported.
+- No rendering/audio/backends are included yet; add your own UI loop and use PPU state to render.
+
+## Roadmap (planned)
+
+- PPU: background/sprite rendering and accurate memory/mirroring behavior
+- APU: audio generation and accurate frame sequencer
+- Input: keyboard/gamepad backends
+- CLI: load ROMs, debugging helpers
+- Mappers: add common mappers beyond NROM
+- Save states and configuration
+- Performance tuning and accuracy improvements
+
+## Contributing
+
+Contributions are welcome:
+- Expand instruction coverage and timing tests
+- Improve PPU/APU fidelity
+- Add mappers and test ROM coverage
+- Documentation and developer experience
+
+Please open an issue or PR to discuss changes.
+
+## License
+
+MIT — see LICENSE.
+
+## Acknowledgments
+
+Thanks to the Rust community and emulator authors for publicly available documentation and test ROM insights.
+
+## Disclaimer
+
+This project does not include Nintendo software or games. Use only legally obtained ROMs.
