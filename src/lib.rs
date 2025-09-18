@@ -8,8 +8,7 @@ Modules:
 - bus: Bus facade coordinating CPU/PPU/APU/Controllers and timing
 - cartridge: iNES v1 loader and cartridge metadata; constructs a Mapper
 - controller: NES controller abstraction
-- cpu: 6502 CPU core (modular refactor façade; preferred)
-- cpu6502: Legacy monolithic 6502 core (temporary; slated for removal after refactor)
+- cpu: 6502 CPU core (facade + state + dispatch + execute modules)
 - mapper: Mapper trait and NROM (mapper 0) implementation
 - ppu: PPU register interface, OAM handling, simple timing and NMI latch
 - ppu_bus: Trait abstraction for PPU memory reads (decouples PPU from full Bus)
@@ -23,9 +22,6 @@ pub mod bus;
 pub mod cartridge;
 pub mod controller;
 pub mod cpu;
-// Legacy monolithic 6502 core (temporary; slated for removal after refactor)
-// Note: prefer `cpu::Cpu6502`; this legacy module remains available during migration.
-pub mod cpu6502;
 pub mod mapper;
 pub mod mappers;
 pub mod ppu;
@@ -34,7 +30,7 @@ pub mod ppu_bus;
 // Re-export commonly used types at the crate root for convenience.
 pub use bus::Bus;
 pub use cartridge::Cartridge;
-pub use cpu::Cpu6502;
+pub use cpu::core::Cpu;
 
 // Shared test utilities (only compiled for tests)
 #[cfg(test)]

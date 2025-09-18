@@ -1,4 +1,4 @@
-use arness::{Bus, Cartridge, Cpu6502};
+use arness::{Bus, Cartridge, Cpu};
 
 fn build_test_ines() -> Vec<u8> {
     // iNES header
@@ -57,7 +57,7 @@ fn main() {
     bus.attach_cartridge(cart);
 
     // Create CPU and reset using reset vector from Bus
-    let mut cpu = Cpu6502::new();
+    let mut cpu = Cpu::new();
     cpu.reset(&mut bus);
 
     // Run until one PPU frame completes (with a safety cap)
@@ -76,11 +76,11 @@ fn main() {
 
     // Inspect state
     let m0200 = bus.read(0x0200);
-    println!("A: 0x{:02X}", cpu.a);
-    println!("X: 0x{:02X}", cpu.x);
-    println!("Y: 0x{:02X}", cpu.y);
-    println!("SP: 0x{:02X}", cpu.sp);
-    println!("PC: 0x{:04X}", cpu.pc);
-    println!("P (flags): 0b{:08b}", cpu.status);
+    println!("A: 0x{:02X}", cpu.a());
+    println!("X: 0x{:02X}", cpu.x());
+    println!("Y: 0x{:02X}", cpu.y());
+    println!("SP: 0x{:02X}", cpu.sp());
+    println!("PC: 0x{:04X}", cpu.pc());
+    println!("P (flags): 0b{:08b}", cpu.status());
     println!("mem[0x0200]: 0x{:02X}", m0200);
 }

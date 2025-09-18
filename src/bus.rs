@@ -469,6 +469,11 @@ impl Bus {
         }
     }
 
+    /// Return the total number of CPU cycles elapsed (external accessor for tests).
+    pub fn total_ticks(&self) -> u64 {
+        self.cpu_cycle as u64
+    }
+
     // -----------------------------
     // Integration helpers
     // -----------------------------

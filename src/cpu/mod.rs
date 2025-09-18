@@ -11,9 +11,9 @@ multi-file structure:
     table.rs        - Feature-gated table-driven metadata & dispatch.
     dispatch.rs     - Orchestrates a single CPU step (DMA/IRQ/NMI + dispatch).
 
-Only the stable public surface (Cpu6502 methods) is re-exported here.
-Downstream code should not rely on internal module layout; all internals
-are subject to change while the table-driven refactor proceeds.
+The public surface is exposed via the `Cpu` facade (wrapping `CpuState`).
+Downstream code should not rely on internal module layout; internal organization
+may evolve as optimizations and table-driven dispatch mature.
 
 Feature flags:
     table_dispatch  - Enables the new table-driven opcode dispatcher.
@@ -23,28 +23,25 @@ Future planned flags (not yet implemented):
     trace           - Optional instruction tracing instrumentation.
 
 Migration status:
-- Initial lift: this façade file created.
-- The legacy `cpu6502.rs` content is *temporarily* still in its original
-  location. Subsequent steps will move code into the submodules declared
-  below. During the transition, Cpu6502 here delegates to the old file's
-  implementation via a thin wrapper (see `legacy_adapter` module).
-  Once migration finishes, the adapter and the old file will be removed.
+- Legacy monolithic `cpu6502.rs` has been removed.
+- All execution now targets `CpuState` through the `Cpu` facade and generic
+  helpers in the dispatch / execute modules.
 
 Usage:
 ```rust
-use arness::cpu::Cpu6502;
+use arness::cpu::core::Cpu;
 
-let mut cpu = Cpu6502::new();
+let mut cpu = Cpu::new();
 cpu.reset(&mut bus);
 cpu.step(&mut bus);
 ```
 
-NOTE: Until the full refactor is complete, some methods (run, irq, nmi,
-etc.) forward to the legacy implementation.
+NOTE: The facade offers stable stepping (`step`, `run`) while internal modules
+(e.g. dispatch) remain free to change implementation details.
 
 */
 
-mod legacy_adapter;
+// Legacy adapter removed; all functionality resides in modular submodules.
 
 // Planned future modules (introduced incrementally; initially empty stubs):
 // mod state;
@@ -55,4 +52,23 @@ mod legacy_adapter;
 // mod table;
 // mod dispatch;
 
-pub use legacy_adapter::Cpu6502;
+// Public crate-internal CPU modules (ordered for clarity)
+pub mod addressing;
+pub mod core;
+pub mod cycles;
+pub mod dispatch;
+pub mod execute;
+pub mod regs;
+pub mod state;
+#[cfg(feature = "table_dispatch")]
+pub mod table;
+
+// Re-exports:
+// - Cpu (facade over CpuState)
+// - CpuState (raw state; exposed for tests, snapshots, trait impls)
+// - Flag constants (canonical bit masks)
+pub use crate::cpu::core::Cpu;
+pub use crate::cpu::regs::CpuRegs;
+pub use crate::cpu::state::{
+    BREAK, CARRY, CpuState, DECIMAL, IRQ_DISABLE, NEGATIVE, OVERFLOW, UNUSED, ZERO,
+};

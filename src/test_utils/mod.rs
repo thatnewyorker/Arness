@@ -142,6 +142,20 @@ fn write_le_u16(buf: &mut [u8], offset: usize, value: u16) {
     buf[offset + 1] = (value >> 8) as u8;
 }
 
+/// Convenience wrapper for cases where only the RESET vector needs to be overridden.
+/// - `reset`: optional RESET vector address. If `None`, defaults to 0x8000 (same as other vectors).
+/// - NMI and IRQ vectors remain at 0x8000 to match the existing default behavior.
+/// This keeps test call sites concise when they only care about the program start address.
+pub fn build_nrom_with_prg_reset_only(
+    prg: &[u8],
+    chr_8k: usize,
+    prg_ram_8k: u8,
+    reset: Option<u16>,
+) -> Vec<u8> {
+    let vectors = reset.map(|r| (r, 0x8000, 0x8000));
+    build_nrom_with_prg(prg, chr_8k, prg_ram_8k, vectors)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

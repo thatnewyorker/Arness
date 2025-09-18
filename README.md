@@ -28,7 +28,7 @@ Not yet implemented
   - bus.rs — Bus and timing glue
   - cartridge.rs — iNES v1 loader, NROM cartridge
   - controller.rs — NES controller logic
-  - cpu6502.rs — CPU core
+  - cpu/ — CPU core (facade, state, dispatch, execute, addressing modules)
   - lib.rs — Library exports
   - main.rs — Demo runner (builds an in-memory NROM program and runs until one PPU frame)
   - mapper.rs — Mapper trait + NROM implementation
@@ -72,7 +72,8 @@ Unit tests cover CPU cycle counts, bus behavior (mirroring, DMA, registers), PPU
 
 You can integrate the emulator core into your own program and drive it from a host loop. Example:
 
-    use arness::{Bus, Cartridge, Cpu6502};
+    use arness::{Bus, Cartridge};
+    use arness::cpu::core::Cpu;
 
     fn main() -> Result<(), String> {
         // Load an iNES v1 ROM (NROM/mapper 0 supported for now)
@@ -82,8 +83,8 @@ You can integrate the emulator core into your own program and drive it from a ho
         let mut bus = Bus::new();
         bus.attach_cartridge(cart);
 
-        // Create CPU and reset
-        let mut cpu = Cpu6502::new();
+        // Create CPU and reset (using the new facade)
+        let mut cpu = Cpu::new();
         cpu.reset(&mut bus);
 
         // Run until one PPU frame (or a safety cap)
