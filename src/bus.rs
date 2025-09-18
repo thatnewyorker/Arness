@@ -424,10 +424,14 @@ impl Bus {
             // Advance CPU counter
             self.cpu_cycle = self.cpu_cycle.wrapping_add(1);
 
-            // Step PPU three times per CPU cycle
-            for _ in 0..3 {
-                self.ppu.tick();
-                self.ppu_cycle = self.ppu_cycle.wrapping_add(1);
+            // Step PPU three times per CPU cycle (move PPU out to avoid mutable + immutable borrow conflict)
+            {
+                let mut ppu = std::mem::replace(&mut self.ppu, Ppu::new());
+                for _ in 0..3 {
+                    ppu.tick(&*self);
+                    self.ppu_cycle = self.ppu_cycle.wrapping_add(1);
+                }
+                self.ppu = ppu;
             }
 
             // Execute one DMA micro-step per CPU cycle if active
@@ -498,11 +502,11 @@ impl Bus {
     /// This avoids overlapping mutable borrows of `self` and `self.ppu` without
     /// requiring any unsafe code.
     pub fn render_ppu_frame(&mut self) {
-        // Move the PPU out to eliminate simultaneous &mut borrows the compiler would reject.
+        // DEPRECATED: legacy frame-level renderer retained temporarily for tests.
+        // The cycle-accurate pipeline should be driven by repeated calls to tick().
+        // Once per-dot background + sprite rendering is complete, this will be removed.
         let mut ppu = std::mem::replace(&mut self.ppu, Ppu::new());
-        // Bus implements PpuBus; &*self satisfies the generic bound for render_frame.
-        ppu.render_frame(&*self);
-        // Move updated PPU state back.
+        ppu.render_frame(&*self); // Fallback path (will be phased out)
         self.ppu = ppu;
     }
 

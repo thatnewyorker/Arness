@@ -130,6 +130,44 @@ pub struct Ppu {
 
     // Background opacity per pixel (1 if bg color index != 0)
     bg_opaque: Vec<u8>,
+
+    // --- Phase B sprite pipeline state (cycle-accurate preparation) ---
+    // Secondary OAM (32 bytes: up to 8 sprites * 4 bytes) for next scanline evaluation.
+    secondary_oam: [u8; 32],
+
+    // Per-sprite slot latched attributes (for the 8 sprites selected for the upcoming scanline).
+    sprite_slot_y: [u8; 8],
+    sprite_slot_tile: [u8; 8],
+    sprite_slot_attr: [u8; 8],
+    sprite_slot_x: [u8; 8],
+    // Pattern bytes fetched during the fetch phase (before loading into shift registers).
+    sprite_slot_pattern_low: [u8; 8],
+    sprite_slot_pattern_high: [u8; 8],
+
+    // Active shift registers (loaded at start of visible scanline).
+    sprite_slot_shift_low: [u8; 8],
+    sprite_slot_shift_high: [u8; 8],
+    // X counters (delay before sprite becomes active on the scanline).
+    sprite_slot_x_counter: [u8; 8],
+    // Shift bookkeeping: number of pixels shifted this scanline and whether the slot is loaded
+    sprite_slot_shift_count: [u8; 8],
+    sprite_slot_loaded: [bool; 8],
+
+    // Original OAM index per slot (for priority & sprite-zero detection).
+    sprite_slot_orig_index: [u8; 8],
+    sprite_slot_is_zero: [bool; 8],
+    sprite_slot_active: [bool; 8],
+
+    // OAM evaluation state
+    oam_eval_oam_index: u8,
+    oam_eval_byte_index: u8,
+    oam_eval_sprite_count: u8,
+
+    // Sprite pattern fetch sequencing (which slot we are currently fetching).
+    sprite_fetch_slot: u8,
+
+    // Master enable for the cycle-accurate sprite pipeline (allows fallback to legacy path if false).
+    sprite_pipeline_enabled: bool,
 }
 
 impl Default for Ppu {
@@ -158,6 +196,27 @@ impl Ppu {
             nmi_latch: false,
             framebuffer: Vec::new(),
             bg_opaque: Vec::new(),
+            // Phase B sprite pipeline fields
+            secondary_oam: [0xFF; 32],
+            sprite_slot_y: [0; 8],
+            sprite_slot_tile: [0; 8],
+            sprite_slot_attr: [0; 8],
+            sprite_slot_x: [0; 8],
+            sprite_slot_pattern_low: [0; 8],
+            sprite_slot_pattern_high: [0; 8],
+            sprite_slot_shift_low: [0; 8],
+            sprite_slot_shift_high: [0; 8],
+            sprite_slot_x_counter: [0; 8],
+            sprite_slot_shift_count: [0; 8],
+            sprite_slot_loaded: [false; 8],
+            sprite_slot_orig_index: [0; 8],
+            sprite_slot_is_zero: [false; 8],
+            sprite_slot_active: [false; 8],
+            oam_eval_oam_index: 0,
+            oam_eval_byte_index: 0,
+            oam_eval_sprite_count: 0,
+            sprite_fetch_slot: 0,
+            sprite_pipeline_enabled: false,
         }
     }
 
@@ -177,7 +236,28 @@ impl Ppu {
         self.scanline = -1;
         self.frame_complete = false;
         self.nmi_latch = false;
-        // Keep framebuffer allocations (avoid churn)
+        // Reset sprite pipeline state
+        self.secondary_oam.fill(0xFF);
+        self.sprite_slot_y = [0; 8];
+        self.sprite_slot_tile = [0; 8];
+        self.sprite_slot_attr = [0; 8];
+        self.sprite_slot_x = [0; 8];
+        self.sprite_slot_pattern_low = [0; 8];
+        self.sprite_slot_pattern_high = [0; 8];
+        self.sprite_slot_shift_low = [0; 8];
+        self.sprite_slot_shift_high = [0; 8];
+        self.sprite_slot_x_counter = [0; 8];
+        self.sprite_slot_shift_count = [0; 8];
+        self.sprite_slot_loaded = [false; 8];
+        self.sprite_slot_orig_index = [0; 8];
+        self.sprite_slot_is_zero = [false; 8];
+        self.sprite_slot_active = [false; 8];
+        self.oam_eval_oam_index = 0;
+        self.oam_eval_byte_index = 0;
+        self.oam_eval_sprite_count = 0;
+        self.sprite_fetch_slot = 0;
+        // Keep disabled until full per-dot implementation replaces legacy sprite overlay
+        self.sprite_pipeline_enabled = false;
     }
 
     /// Read-only framebuffer slice (RGBA).
@@ -391,26 +471,176 @@ impl Ppu {
         }
     }
 
-    /// Advance one PPU dot (should be invoked 3x per CPU cycle by the bus).
-    pub fn tick(&mut self) {
+    /// Advance one PPU dot (invoked 3x per CPU cycle by the bus).
+    ///
+    /// Phase B sprite pipeline skeleton:
+    /// - This replaces the old frame-level sprite overlay approach conceptually.
+    /// - The actual sprite fetching / shift-register logic will be integrated here
+    ///   in subsequent incremental edits (fields & evaluation state machine not yet added).
+    /// - For now this preserves timing (dot/scanline/frame progression) and flag behavior
+    ///   while providing placeholder phase demarcations for later implementation:
+    ///     * CLEAR secondary OAM: dots   1- 64
+    ///     * EVALUATE (primary OAM): dots 65-256
+    ///     * FETCH sprite patterns: dots 257-320
+    ///     * IDLE / BG prefetch: dots 321-340
+    /// - Visible dots for pixel generation: 1-256 on scanlines 0-239 (not yet producing per-dot pixels here).
+    pub fn tick<B: crate::ppu_bus::PpuBus>(&mut self, bus: &B) {
         self.dot = self.dot.wrapping_add(1);
 
+        // Entering first dot of a scanline: handle vblank / pre-render housekeeping
         if self.dot == 1 {
             if self.scanline == 241 {
-                // Entering vblank
+                // Entering VBlank
                 self.set_vblank(true);
                 if self.nmi_enabled() {
                     self.nmi_latch = true;
                 }
             } else if self.scanline == -1 {
-                // Pre-render line: clear flags
+                // Pre-render line: clear status flags at start
                 self.set_vblank(false);
                 self.set_sprite_zero_hit(false);
                 self.set_sprite_overflow(false);
                 self.frame_complete = false;
+                // Reset (future) sprite evaluation state
+            } else {
+                // Start of a visible scanline: load sprite shift registers from fetched patterns
+                if self.scanline >= 0 && self.scanline < NES_HEIGHT as i16 {
+                    self.load_sprite_shift_registers();
+                }
             }
         }
 
+        let visible_scanline = self.scanline >= 0 && self.scanline < NES_HEIGHT as i16;
+        let prerender_line = self.scanline == -1;
+
+        if visible_scanline || prerender_line {
+            // --- Sprite pipeline phases (placeholders; logic to be filled incrementally) ---
+            if self.dot >= 1 && self.dot <= 64 {
+                // CLEAR phase: write one 0xFF byte of secondary OAM per dot (0..63)
+                let idx = (self.dot - 1) as usize;
+                if idx < self.secondary_oam.len() {
+                    self.secondary_oam[idx] = 0xFF;
+                }
+                // When CLEAR completes (dot 64), reset evaluation counters for upcoming EVALUATE phase
+                if self.dot == 64 {
+                    self.oam_eval_oam_index = 0;
+                    self.oam_eval_byte_index = 0;
+                    self.oam_eval_sprite_count = 0;
+                }
+            } else if self.dot >= 65 && self.dot <= 256 {
+                // PRIMARY OAM EVALUATION: scan primary OAM and copy up to 8 in-range sprites (for next scanline) into secondary OAM.
+                // One OAM byte processed per dot. Simplified (Phase B) model:
+                // - Determine if sprite is in range using its Y (byte 0) against (scanline + 1).
+                // - If in range and we have <8 sprites already, copy each of its 4 bytes into the next secondary OAM slot.
+                // - Increment sprite count only after byte 3 (full sprite copied), preserving contiguous 4-byte layout.
+                if self.oam_eval_oam_index < 64 {
+                    let sprite_index = self.oam_eval_oam_index as usize;
+                    let byte_index = self.oam_eval_byte_index as usize;
+                    let base = sprite_index * 4;
+                    let y_byte = self.oam[base];
+                    let next_scanline = self.scanline + 1;
+                    let sprite_height = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+                    // Y comparison semantics: using raw OAM Y as top line (Phase A parity).
+                    let in_range = next_scanline >= y_byte as i16
+                        && next_scanline < y_byte as i16 + sprite_height as i16;
+                    let copying = in_range && self.oam_eval_sprite_count < 8;
+                    let value = self.oam[base + byte_index];
+                    if copying {
+                        let slot = self.oam_eval_sprite_count as usize;
+                        // Track original OAM index used for this selected slot (for priority and sprite-zero hit).
+                        self.sprite_slot_orig_index[slot] = self.oam_eval_oam_index;
+                        self.sprite_slot_is_zero[slot] = self.oam_eval_oam_index == 0;
+                        let dest = slot * 4 + byte_index;
+                        if dest < self.secondary_oam.len() {
+                            self.secondary_oam[dest] = value;
+                        }
+                    }
+                    // Advance byte index; when finishing byte 3, advance to next sprite and (if copying) bump count.
+                    self.oam_eval_byte_index = self.oam_eval_byte_index.wrapping_add(1);
+                    if self.oam_eval_byte_index >= 4 {
+                        self.oam_eval_byte_index = 0;
+                        if copying {
+                            // Mark sprite accepted (increment count after full 4 bytes copied)
+                            self.oam_eval_sprite_count =
+                                self.oam_eval_sprite_count.saturating_add(1);
+                        }
+                        self.oam_eval_oam_index = self.oam_eval_oam_index.wrapping_add(1);
+                    }
+                }
+            } else if self.dot >= 257 && self.dot <= 320 {
+                // SPRITE PATTERN FETCH: for each of 8 slots over 64 dots, compute row and fetch pattern low/high
+                let fetch_idx = self.dot - 257; // 0..63
+                let slot = (fetch_idx / 8) as usize; // 0..7
+                let sub = fetch_idx % 8; // 0..7 (sub-cycle within slot)
+                if slot < 8 {
+                    // Validate slot by secondary OAM Y != 0xFF
+                    let base = slot * 4;
+                    let y = self.secondary_oam[base];
+                    if y != 0xFF {
+                        if sub == 0 {
+                            // Latch sprite metadata from secondary OAM for this slot
+                            let tile = self.secondary_oam[base + 1];
+                            let attr = self.secondary_oam[base + 2];
+                            let x = self.secondary_oam[base + 3];
+                            self.sprite_slot_y[slot] = y;
+                            self.sprite_slot_tile[slot] = tile;
+                            self.sprite_slot_attr[slot] = attr;
+                            self.sprite_slot_x[slot] = x;
+                            // orig index flags were set during evaluation; no change here
+                        } else if sub == 5 || sub == 6 {
+                            // Compute pattern addresses and fetch low/high planes
+                            let tile = self.secondary_oam[base + 1];
+                            let attr = self.secondary_oam[base + 2];
+                            let sprite_height = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+                            let next_scanline = self.scanline + 1;
+                            // Row within sprite for next scanline; in-range guaranteed by evaluation
+                            let mut row_in_sprite = (next_scanline - y as i16) as u16; // 0..(H-1)
+                            // Apply vertical flip
+                            if (attr & 0x80) != 0 {
+                                row_in_sprite = (sprite_height as u16 - 1) - row_in_sprite;
+                            }
+                            let (addr_low, addr_high) = if sprite_height == 8 {
+                                // 8x8 sprites: pattern base from PPUCTRL bit 3 (0x08)
+                                let base_sel = if (self.ctrl & 0x08) != 0 {
+                                    0x1000
+                                } else {
+                                    0x0000
+                                };
+                                let row = (row_in_sprite & 7) as u16;
+                                let a = base_sel + (tile as u16) * 16 + row;
+                                (a, a + 8)
+                            } else {
+                                // 8x16 sprites: table from tile LSB; tile index even/odd select top/bottom
+                                let table = (tile as u16 & 1) * 0x1000;
+                                let base_tile = (tile & 0xFE) as u16;
+                                let row = row_in_sprite as u16; // 0..15
+                                let tile_select = if row < 8 { 0 } else { 1 };
+                                let row_in_tile = (row & 7) as u16;
+                                let a = table + (base_tile + tile_select) * 16 + row_in_tile;
+                                (a, a + 8)
+                            };
+                            if sub == 5 {
+                                let low = bus.ppu_read(addr_low);
+                                self.sprite_slot_pattern_low[slot] = low;
+                            } else {
+                                let high = bus.ppu_read(addr_high);
+                                self.sprite_slot_pattern_high[slot] = high;
+                            }
+                        }
+                    }
+                }
+            } else if self.dot >= 321 && self.dot <= 340 {
+                // BG prefetch phase; sprite pipeline idle
+            }
+
+            // Per-dot background + sprite pixel production
+            if visible_scanline && (1..=256).contains(&self.dot) {
+                self.per_dot_background_pixel(bus);
+                self.produce_sprite_pixel(bus, (self.dot - 1) as usize, self.scanline as usize);
+            }
+        }
+
+        // End-of-scanline wrap
         if self.dot >= 341 {
             self.dot = 0;
             self.scanline += 1;
@@ -422,6 +652,194 @@ impl Ppu {
     }
 
     /// Write CPU-facing PPU register ($2000..$2007).
+    /// Produce a single background pixel for the current (scanline, dot).
+    /// Simplified per-dot background fetch mirroring logic in original frame renderer.
+    /// Does not yet emulate fine/coarse scroll or horizontal/vertical wrapping; uses (0,0) origin.
+    fn per_dot_background_pixel<B: crate::ppu_bus::PpuBus>(&mut self, bus: &B) {
+        // Allocate framebuffer lazily at first visible pixel if needed.
+        let needed = NES_WIDTH * NES_HEIGHT * BYTES_PER_PIXEL;
+        if self.framebuffer.len() != needed {
+            self.framebuffer.resize(needed, 0);
+        }
+        if self.bg_opaque.len() != NES_WIDTH * NES_HEIGHT {
+            self.bg_opaque.resize(NES_WIDTH * NES_HEIGHT, 0);
+        }
+
+        let x = (self.dot - 1) as usize;
+        let y = self.scanline as usize;
+        if x >= NES_WIDTH || y >= NES_HEIGHT {
+            return;
+        }
+
+        // Background enable check (mask bit 3). If disabled, leave pixel as transparent/unwritten.
+        if (self.mask & 0x08) == 0 {
+            return;
+        }
+
+        // Derive tile coordinates (no scrolling yet).
+        let tile_x = x / 8;
+        let tile_y = y / 8;
+        let row_in_tile = y & 7;
+
+        // Fetch tile id from nametable 0.
+        let nt_index = 0x2000 + (tile_y as u16) * 32 + tile_x as u16;
+        let tile_id = bus.ppu_read(nt_index);
+
+        // Attribute fetch (same quadrant logic as frame renderer)
+        let coarse_attr_y = tile_y / 4;
+        let attr_row_quad_y = (tile_y % 4) / 2;
+        let attr_index = 0x23C0 + (coarse_attr_y as u16) * 8 + (tile_x as u16 / 4);
+        let attr_byte = bus.ppu_read(attr_index);
+        let attr_quad_x = (tile_x % 4) / 2;
+        let quadrant = attr_row_quad_y * 2 + attr_quad_x;
+        let palette_group = (attr_byte >> (quadrant * 2)) & 0x03;
+
+        let bg_pattern_base = if (self.ctrl & 0x10) != 0 {
+            0x1000
+        } else {
+            0x0000
+        };
+        let pattern_addr = bg_pattern_base + (tile_id as u16) * 16 + row_in_tile as u16;
+        let low_plane = bus.ppu_read(pattern_addr);
+        let high_plane = bus.ppu_read(pattern_addr + 8);
+
+        let bit = x & 7;
+        let shift = 7 - bit;
+        let lo = (low_plane >> shift) & 1;
+        let hi = (high_plane >> shift) & 1;
+        let ci = (hi << 1) | lo; // 0..3
+
+        let nes_palette_entry = if ci == 0 {
+            bus.ppu_read(0x3F00)
+        } else {
+            let pal = 0x3F00 + (palette_group as u16) * 4 + ci as u16;
+            bus.ppu_read(pal)
+        } & 0x3F;
+
+        let rgba = NES_PALETTE[nes_palette_entry as usize];
+        let fi = (y * NES_WIDTH + x) * BYTES_PER_PIXEL;
+        self.framebuffer[fi] = rgba[0];
+        self.framebuffer[fi + 1] = rgba[1];
+        self.framebuffer[fi + 2] = rgba[2];
+        self.framebuffer[fi + 3] = 0xFF;
+
+        if ci != 0 {
+            self.bg_opaque[y * NES_WIDTH + x] = 1;
+        }
+    }
+
+    // Load fetched sprite pattern bytes into shift registers for the new visible scanline.
+    // Applies horizontal flip by reversing bit order at load time.
+    fn load_sprite_shift_registers(&mut self) {
+        for slot in 0..8 {
+            let base = slot * 4;
+            // Slot considered valid if secondary OAM Y != 0xFF (populated during evaluation)
+            if self.secondary_oam[base] == 0xFF {
+                self.sprite_slot_active[slot] = false;
+                continue;
+            }
+
+            let attr = self.sprite_slot_attr[slot];
+            let hflip = (attr & 0x40) != 0;
+
+            let mut low = self.sprite_slot_pattern_low[slot];
+            let mut high = self.sprite_slot_pattern_high[slot];
+
+            if hflip {
+                low = Self::reverse8(low);
+                high = Self::reverse8(high);
+            }
+
+            self.sprite_slot_shift_low[slot] = low;
+            self.sprite_slot_shift_high[slot] = high;
+            self.sprite_slot_x_counter[slot] = self.sprite_slot_x[slot];
+            self.sprite_slot_active[slot] = true;
+        }
+    }
+
+    // Produce a sprite pixel at (x,y) by evaluating up to 8 sprite slots with shift registers.
+    // Applies priority rules and sets sprite-zero hit when conditions are met.
+    fn produce_sprite_pixel<B: crate::ppu_bus::PpuBus>(&mut self, bus: &B, x: usize, y: usize) {
+        // If sprites disabled (PPUMASK bit 4), skip.
+        if (self.mask & 0x10) == 0 {
+            return;
+        }
+        if x >= NES_WIDTH || y >= NES_HEIGHT {
+            return;
+        }
+
+        // First, decrement X counters for active slots.
+        for s in 0..8 {
+            if self.sprite_slot_active[s] && self.sprite_slot_x_counter[s] > 0 {
+                self.sprite_slot_x_counter[s] -= 1;
+            }
+        }
+
+        // Select the first non-transparent sprite pixel among active slots whose x_counter == 0.
+        let mut chosen_slot: Option<usize> = None;
+        let mut chosen_ci: u8 = 0;
+        for s in 0..8 {
+            if !self.sprite_slot_active[s] || self.sprite_slot_x_counter[s] != 0 {
+                continue;
+            }
+            let lo = (self.sprite_slot_shift_low[s] >> 7) & 1;
+            let hi = (self.sprite_slot_shift_high[s] >> 7) & 1;
+            let ci = (hi << 1) | lo;
+            if ci != 0 {
+                chosen_slot = Some(s);
+                chosen_ci = ci;
+                break;
+            }
+        }
+
+        // Background opacity at this pixel
+        let bg_is_opaque = self.bg_opaque[y * NES_WIDTH + x] != 0;
+
+        // If we have a candidate, apply priority and draw if allowed.
+        if let Some(s) = chosen_slot {
+            let attr = self.sprite_slot_attr[s];
+            let palette = (attr & 0x03) as u16;
+            let priority_behind_bg = (attr & 0x20) != 0;
+
+            if !(priority_behind_bg && bg_is_opaque) {
+                // Sprite pixel visible: perform palette lookup in sprite palette space 0x3F10..0x3F1F
+                let pal_addr = 0x3F10 + palette * 4 + chosen_ci as u16;
+                let nes_palette_entry = bus.ppu_read(pal_addr) & 0x3F;
+                let rgba = NES_PALETTE[nes_palette_entry as usize];
+                let fi = (y * NES_WIDTH + x) * BYTES_PER_PIXEL;
+                self.framebuffer[fi] = rgba[0];
+                self.framebuffer[fi + 1] = rgba[1];
+                self.framebuffer[fi + 2] = rgba[2];
+                self.framebuffer[fi + 3] = 0xFF;
+
+                // Sprite-zero hit: when sprite 0 overlaps non-zero background
+                if self.sprite_slot_is_zero[s] && bg_is_opaque {
+                    // Gating refinements (left-8 masking, timing) to be added in Phase C
+                    self.set_sprite_zero_hit(true);
+                }
+            }
+        }
+
+        // Shift registers for all active slots that have started outputting pixels.
+        for s in 0..8 {
+            if self.sprite_slot_active[s] && self.sprite_slot_x_counter[s] == 0 {
+                self.sprite_slot_shift_low[s] <<= 1;
+                self.sprite_slot_shift_high[s] <<= 1;
+                // Optionally, slots could be marked inactive after 8 shifts; not strictly necessary.
+            }
+        }
+    }
+
+    // Bit-reversal helper for horizontal flip
+    #[inline]
+    fn reverse8(v: u8) -> u8 {
+        let mut x = v;
+        x = (x & 0xF0) >> 4 | (x & 0x0F) << 4;
+        x = (x & 0xCC) >> 2 | (x & 0x33) << 2;
+        x = (x & 0xAA) >> 1 | (x & 0x55) << 1;
+        x
+    }
+
     pub fn write_reg(&mut self, addr: u16, value: u8) {
         let reg = 0x2000 + (addr & 0x7);
         match reg {
@@ -610,6 +1028,122 @@ impl Ppu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sprite_clear_phase_secondary_oam_filled() {
+        let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
+        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
+        let mut bus = crate::bus::Bus::new();
+        bus.attach_cartridge(cart);
+        // Advance until scanline 0 dot 64 (end of CLEAR phase for first visible line).
+        while !(bus.ppu().scanline == 0 && bus.ppu().dot == 64) {
+            bus.tick(1);
+        }
+        for i in 0..32 {
+            assert_eq!(
+                bus.ppu().secondary_oam[i],
+                0xFF,
+                "secondary_oam[{}] not cleared",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn sprite_evaluate_phase_copies_up_to_8_in_range_sprites() {
+        // Build a minimal cart; CHR not relevant for evaluation.
+        let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
+        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
+        let mut bus = crate::bus::Bus::new();
+        bus.attach_cartridge(cart);
+
+        {
+            // Prepare 10 sprites whose Y=0 so they are all in range for next_scanline=1 during scanline 0 evaluation.
+            // Each sprite i has bytes: Y=0, tile=i, attr=0, X=i
+            let ppu = bus.ppu_mut();
+            for i in 0..10u8 {
+                let base = (i as usize) * 4;
+                ppu.oam[base] = 0; // Y
+                ppu.oam[base + 1] = i; // tile
+                ppu.oam[base + 2] = 0x00; // attributes
+                ppu.oam[base + 3] = i; // X
+            }
+        }
+
+        // Advance to (end of) evaluation window of first visible scanline:
+        // We need to reach scanline 0 after CLEAR (dot 64) and past some evaluation dots.
+        while !(bus.ppu().scanline == 0 && bus.ppu().dot == 256) {
+            bus.tick(1);
+        }
+
+        let ppu_ref = bus.ppu();
+        // Expect exactly 8 accepted sprites
+        assert_eq!(
+            ppu_ref.oam_eval_sprite_count, 8,
+            "Expected 8 sprites selected, got {}",
+            ppu_ref.oam_eval_sprite_count
+        );
+        // Verify the 8 copied sprites match OAM entries 0..7
+        for s in 0..8usize {
+            let so = &ppu_ref.secondary_oam[s * 4..s * 4 + 4];
+            let base = s * 4;
+            assert_eq!(so[0], 0, "Sprite {} Y mismatch", s);
+            assert_eq!(so[1], s as u8, "Sprite {} tile mismatch", s);
+            assert_eq!(so[2], 0x00, "Sprite {} attr mismatch", s);
+            assert_eq!(so[3], s as u8, "Sprite {} X mismatch", s);
+        }
+        // Next slot (slot 8) should remain cleared (first byte 0xFF) indicating no 9th copied.
+        assert_eq!(
+            ppu_ref.secondary_oam[32 - 4],
+            0xFF,
+            "Slot 8 unexpectedly populated"
+        );
+    }
+
+    #[test]
+    fn sprite_fetch_phase_fetches_pattern_low_high_for_slot0() {
+        let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
+        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
+        let mut bus = crate::bus::Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Configure PPU: 8x8 sprites, sprite pattern table at $1000 (PPUCTRL bit 3)
+        {
+            let ppu = bus.ppu_mut();
+            ppu.ctrl = (ppu.ctrl & !0x20) | 0x08; // clear 8x16, set sprite pattern base 0x1000
+            // Sprite 0 at Y=0, tile=2, attr=0, X=0 so it's in-range for pre-render evaluation (next_scanline=0)
+            ppu.oam[0] = 0; // Y
+            ppu.oam[1] = 2; // tile index
+            ppu.oam[2] = 0x00; // attributes
+            ppu.oam[3] = 0; // X
+        }
+
+        // Program CHR pattern bytes for tile 2, row 0 at pattern base $1000
+        let tile: u8 = 2;
+        let low: u8 = 0xA5;
+        let high: u8 = 0x5A;
+        bus.ppu_write(0x1000 + (tile as u16) * 16 + 0, low);
+        bus.ppu_write(0x1000 + (tile as u16) * 16 + 8 + 0, high);
+
+        // Advance to the end of FETCH window on pre-render line (-1, dots 257..320)
+        while !(bus.ppu().scanline == -1 && bus.ppu().dot == 320) {
+            bus.tick(1);
+        }
+
+        let ppu_ref = bus.ppu();
+        assert_eq!(
+            ppu_ref.sprite_slot_pattern_low[0], low,
+            "low plane mismatch for slot 0"
+        );
+        assert_eq!(
+            ppu_ref.sprite_slot_pattern_high[0], high,
+            "high plane mismatch for slot 0"
+        );
+        assert_eq!(ppu_ref.sprite_slot_y[0], 0, "slot 0 Y mismatch");
+        assert_eq!(ppu_ref.sprite_slot_tile[0], tile, "slot 0 tile mismatch");
+        assert_eq!(ppu_ref.sprite_slot_attr[0], 0x00, "slot 0 attr mismatch");
+        assert_eq!(ppu_ref.sprite_slot_x[0], 0, "slot 0 X mismatch");
+    }
 
     #[test]
     fn status_read_clears_vblank_and_write_toggle() {
