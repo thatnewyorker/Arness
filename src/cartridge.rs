@@ -22,6 +22,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::mapper::{Mapper, Nrom};
+use crate::mappers::{Cnrom, Mmc1, Mmc3};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Mirroring {
@@ -172,15 +173,26 @@ impl Cartridge {
                 .ok_or_else(|| "PRG RAM size overflow".to_string())?
         };
 
-        // Currently only mapper 0 (NROM) is supported
-        if mapper_id != 0 {
-            return Err(format!("Unsupported mapper id: {}", mapper_id));
-        }
-
-        let nrom = Nrom::new(prg_rom, chr, chr_is_ram, prg_ram_len);
+        // Mapper factory:
+        // 0: NROM implemented
+        // 3: CNROM implemented (CHR bank switching)
+        // 1,4: placeholders (MMC1 / MMC3) pending implementation
+        let mapper: Box<dyn Mapper> = match mapper_id {
+            0 => Box::new(Nrom::new(prg_rom, chr, chr_is_ram, prg_ram_len)),
+            1 => {
+                let prg_ram = vec![0; prg_ram_len];
+                Box::new(Mmc1::new(prg_rom, prg_ram, chr, chr_is_ram))
+            }
+            3 => Box::new(Cnrom::new(prg_rom, chr, chr_is_ram)),
+            4 => {
+                let prg_ram = vec![0; prg_ram_len];
+                Box::new(Mmc3::new(prg_rom, prg_ram, chr, chr_is_ram))
+            }
+            _ => return Err(format!("Unsupported mapper id: {}", mapper_id)),
+        };
 
         Ok(Self {
-            mapper: RefCell::new(Box::new(nrom)),
+            mapper: RefCell::new(mapper),
             mapper_id,
             mirroring,
             battery,

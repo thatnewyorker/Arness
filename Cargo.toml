@@ -5,4 +5,14 @@ edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+# Enable interactive window/display (winit + pixels)
+display = ["dep:pixels", "dep:winit"]
+# Enable screenshot helpers using the image crate
+screenshot = ["dep:image"]
+
 [dependencies]
+pixels = { version = "0.15.0", optional = true }
+winit = { version = "0.30.12", optional = true }
+image = { version = "0.25.8", optional = true }

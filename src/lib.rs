@@ -11,6 +11,7 @@ Modules:
 - cpu6502: 6502 CPU core with cycle-accurate timing for documented opcodes
 - mapper: Mapper trait and NROM (mapper 0) implementation
 - ppu: PPU register interface, OAM handling, simple timing and NMI latch
+- ppu_bus: Trait abstraction for PPU memory reads (decouples PPU from full Bus)
 
 In tests, shared iNES builders are available under `crate::test_utils`.
 "#]
@@ -22,7 +23,9 @@ pub mod cartridge;
 pub mod controller;
 pub mod cpu6502;
 pub mod mapper;
+pub mod mappers;
 pub mod ppu;
+pub mod ppu_bus;
 
 // Re-export commonly used types at the crate root for convenience.
 pub use bus::Bus;

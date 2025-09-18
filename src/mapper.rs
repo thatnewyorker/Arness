@@ -21,6 +21,17 @@ This file intentionally avoids dependencies on other modules to keep the trait m
 /// - Implementations decide mapping/banking and handle out-of-range accesses reasonably.
 /// - `reset()` allows mapper-specific state to be reinitialized on power/reset.
 /// - `irq_pending()` returns whether the mapper asserts an IRQ line (used by Bus/CPU).
+/// Dynamic mirroring modes a mapper may produce at runtime. When a mapper
+/// returns `Some(MapperMirroring)` from `current_mirroring`, it overrides the
+/// static cartridge header mirroring (except in four‑screen cases).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum MapperMirroring {
+    SingleScreenLower,
+    SingleScreenUpper,
+    Vertical,
+    Horizontal,
+}
+
 pub trait Mapper {
     /// Mapper numeric identifier (e.g., 0 for NROM).
     fn mapper_id(&self) -> u16;
@@ -32,7 +43,7 @@ pub trait Mapper {
     fn cpu_write(&mut self, addr: u16, value: u8);
 
     /// PPU-visible read at $0000..=$1FFF (pattern table region).
-    fn ppu_read(&mut self, addr: u16) -> u8;
+    fn ppu_read(&self, addr: u16) -> u8;
 
     /// PPU-visible write at $0000..=$1FFF (pattern table region).
     fn ppu_write(&mut self, addr: u16, value: u8);
@@ -43,6 +54,13 @@ pub trait Mapper {
     /// Whether this mapper is asserting its IRQ output line at the moment.
     fn irq_pending(&self) -> bool {
         false
+    }
+
+    /// Optional dynamic nametable mirroring override. Mappers that can
+    /// change mirroring (e.g., MMC1) return `Some(mode)`. Others return
+    /// `None` so the Bus uses the cartridge header mirroring.
+    fn current_mirroring(&self) -> Option<MapperMirroring> {
+        None
     }
 }
 
@@ -180,7 +198,7 @@ impl Mapper for Nrom {
         }
     }
 
-    fn ppu_read(&mut self, addr: u16) -> u8 {
+    fn ppu_read(&self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x1FFF => self.chr_read(addr),
             _ => 0, // mapper does not handle $2000+

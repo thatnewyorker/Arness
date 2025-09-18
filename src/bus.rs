@@ -25,6 +25,7 @@ Notes:
 use crate::apu::Apu;
 use crate::cartridge::Cartridge;
 use crate::controller::Controller;
+use crate::mapper::MapperMirroring;
 use crate::ppu::Ppu;
 
 pub struct Bus {
@@ -251,12 +252,12 @@ impl Bus {
     // PPU memory mapping helpers
     // -----------------------------
 
-    fn ppu_mem_read(&mut self, addr: u16) -> u8 {
+    fn ppu_mem_read(&self, addr: u16) -> u8 {
         let a = addr & 0x3FFF;
         match a {
             0x0000..=0x1FFF => {
                 if let Some(cart) = &self.cartridge {
-                    cart.mapper.borrow_mut().ppu_read(a)
+                    cart.mapper.borrow().ppu_read(a)
                 } else {
                     0
                 }
@@ -302,28 +303,71 @@ impl Bus {
         let table = (a / 0x400) as u16; // 0..3
         let offset = (a % 0x400) as usize;
 
-        let mirroring = if let Some(cart) = &self.cartridge {
-            cart.mirroring()
+        // Determine header mirroring and (if allowed) dynamic mapper mirroring override.
+        let (header_mirr, dyn_mirr) = if let Some(cart) = &self.cartridge {
+            let header = cart.mirroring();
+            // Do not allow mapper override for four-screen (header enforced).
+            let dynamic = if !matches!(header, crate::cartridge::Mirroring::FourScreen) {
+                cart.mapper.borrow().current_mirroring()
+            } else {
+                None
+            };
+            (header, dynamic)
         } else {
-            crate::cartridge::Mirroring::Horizontal
+            (crate::cartridge::Mirroring::Horizontal, None)
         };
 
-        let bank = match mirroring {
-            crate::cartridge::Mirroring::Horizontal => {
-                // 0,1 -> bank 0; 2,3 -> bank 1
-                if table < 2 { 0 } else { 1 }
+        let bank = if let Some(mode) = dyn_mirr {
+            match mode {
+                MapperMirroring::SingleScreenLower => 0,
+                MapperMirroring::SingleScreenUpper => 1,
+                MapperMirroring::Vertical => {
+                    // 0,2 -> bank 0; 1,3 -> bank 1
+                    if (table & 1) == 0 { 0 } else { 1 }
+                }
+                MapperMirroring::Horizontal => {
+                    // 0,1 -> bank 0; 2,3 -> bank 1
+                    if table < 2 { 0 } else { 1 }
+                }
             }
-            crate::cartridge::Mirroring::Vertical => {
-                // 0,2 -> bank 0; 1,3 -> bank 1
-                if (table & 1) == 0 { 0 } else { 1 }
-            }
-            crate::cartridge::Mirroring::FourScreen => {
-                // Four-screen not fully modeled; approximate as vertical mirroring
-                if (table & 1) == 0 { 0 } else { 1 }
+        } else {
+            match header_mirr {
+                crate::cartridge::Mirroring::Horizontal => {
+                    if table < 2 {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                crate::cartridge::Mirroring::Vertical => {
+                    if (table & 1) == 0 {
+                        0
+                    } else {
+                        1
+                    }
+                }
+                crate::cartridge::Mirroring::FourScreen => {
+                    // Four-screen not fully modeled; approximate as vertical mirroring
+                    if (table & 1) == 0 { 0 } else { 1 }
+                }
             }
         };
 
         (bank as usize) * 0x400 + offset
+    }
+
+    /// Public wrapper for reading from PPU address space (0x0000-0x3FFF) using the
+    /// same mirroring and mapper logic as CPU-driven PPUDATA accesses. Intended
+    /// for rendering code (e.g., background/sprite fetching) to obtain pattern,
+    /// nametable, attribute and palette bytes without duplicating mapping logic.
+    pub fn ppu_read(&self, addr: u16) -> u8 {
+        self.ppu_mem_read(addr)
+    }
+
+    /// Public wrapper for writing to PPU address space (used mainly in tests or
+    /// tools to prime pattern/nametable/palette memory deterministically).
+    pub fn ppu_write(&mut self, addr: u16, value: u8) {
+        self.ppu_mem_write(addr, value);
     }
 
     fn map_palette_addr(&self, addr: u16) -> usize {
@@ -414,9 +458,14 @@ impl Bus {
                 self.nmi_pending = true;
             }
 
-            // Step APU once per CPU cycle and aggregate IRQ
+            // Step APU once per CPU cycle and aggregate IRQ (APU OR mapper)
             self.apu.tick(1);
-            self.irq_line = self.apu.irq_asserted();
+            let mapper_irq = if let Some(cart) = &self.cartridge {
+                cart.mapper.borrow().irq_pending()
+            } else {
+                false
+            };
+            self.irq_line = self.apu.irq_asserted() || mapper_irq;
         }
     }
 
@@ -430,6 +479,26 @@ impl Bus {
 
     pub fn apu_mut(&mut self) -> &mut Apu {
         &mut self.apu
+    }
+
+    /// Immutable reference to the PPU (useful in tests after a scoped mutable borrow).
+    pub fn ppu(&self) -> &Ppu {
+        &self.ppu
+    }
+
+    /// Render a full PPU frame into the PPU's internal framebuffer.
+    ///
+    /// Safe implementation: move the PPU out, render with only an immutable
+    /// borrow of the Bus (Ppu::render_frame now takes &Bus), then move it back.
+    /// This avoids overlapping mutable borrows of `self` and `self.ppu` without
+    /// requiring any unsafe code.
+    pub fn render_ppu_frame(&mut self) {
+        // Move the PPU out to eliminate simultaneous &mut borrows the compiler would reject.
+        let mut ppu = std::mem::replace(&mut self.ppu, Ppu::new());
+        // Bus implements PpuBus; &*self satisfies the generic bound for render_frame.
+        ppu.render_frame(&*self);
+        // Move updated PPU state back.
+        self.ppu = ppu;
     }
 
     pub fn controller_mut(&mut self, idx: usize) -> Option<&mut Controller> {
@@ -627,5 +696,247 @@ mod tests {
         assert_eq!(bus.read(0x2007), 0x11);
         // Third read returns 0x22
         assert_eq!(bus.read(0x2007), 0x22);
+    }
+    // -------- Dynamic MMC1 mirroring tests --------
+    //
+    // These tests construct a minimal MMC1 cartridge (mapper 1) and exercise
+    // control register (mirroring bits 0-1) to verify Bus nametable mapping
+    // responds immediately to dynamic mirroring changes.
+
+    fn build_mmc1_ines(prg_16k: u8, chr_8k: u8, flags6: u8, flags7: u8, prg_ram_8k: u8) -> Vec<u8> {
+        // Minimal iNES builder (no trainer, no NES2.0) with mapper id from flags.
+        let mut v = Vec::new();
+        v.extend_from_slice(b"NES\x1A");
+        v.push(prg_16k); // PRG banks (16K units)
+        v.push(chr_8k); // CHR banks (8K units; 0 => CHR RAM 8K)
+        v.push(flags6); // flags6
+        v.push(flags7); // flags7
+        v.push(prg_ram_8k); // PRG RAM size in 8K units (0 => custom allocate 8K convention; we pass 1)
+        v.extend_from_slice(&[0u8; 7]); // padding
+        // PRG ROM
+        v.extend(std::iter::repeat(0xEA).take(prg_16k as usize * 16 * 1024));
+        // CHR (or zero if CHR RAM requested)
+        if chr_8k > 0 {
+            v.extend(std::iter::repeat(0x00).take(chr_8k as usize * 8 * 1024));
+        }
+        v
+    }
+
+    fn mmc1_serial_write(bus: &mut Bus, value5: u8) {
+        // Write 5 LSB-first bits to $8000
+        for i in 0..5 {
+            let bit = (value5 >> i) & 1;
+            bus.write(0x8000, bit);
+        }
+    }
+
+    #[test]
+    fn mmc1_dynamic_vertical_mirroring() {
+        // Start with mapper 1 (MMC1). Set control bits to 0b00010 (vertical)
+        // Mapper id 1 => flags6 upper nibble = 0001 => 0x10
+        let rom = build_mmc1_ines(2, 1, 0x10, 0x00, 1);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Write control = 0b00010 (vertical)
+        mmc1_serial_write(&mut bus, 0b00010);
+
+        // Write to $2000
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x00);
+        bus.write(0x2007, 0xA1);
+
+        // Mirror in vertical: $2800 mirrors $2000
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x28);
+        bus.write(0x2006, 0x00);
+        let _ = bus.read(0x2007);
+        let v = bus.read(0x2007);
+        assert_eq!(v, 0xA1);
+    }
+
+    #[test]
+    fn mmc1_dynamic_horizontal_mirroring() {
+        // Control bits 0b00011 => horizontal
+        let rom = build_mmc1_ines(2, 1, 0x10, 0x00, 1);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        mmc1_serial_write(&mut bus, 0b00011);
+
+        // Write to $2000
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x00);
+        bus.write(0x2007, 0xB2);
+
+        // Horizontal: $2400 mirrors $2000
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x24);
+        bus.write(0x2006, 0x00);
+        let _ = bus.read(0x2007);
+        let v = bus.read(0x2007);
+        assert_eq!(v, 0xB2);
+    }
+
+    #[test]
+    fn mmc1_dynamic_single_screen_lower() {
+        // Control bits 0b00000 => single-screen lower ($2000 region everywhere)
+        let rom = build_mmc1_ines(1, 1, 0x10, 0x00, 1);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        mmc1_serial_write(&mut bus, 0b00000);
+
+        // Write to $2000
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x10);
+        bus.write(0x2007, 0xC3);
+
+        // Read from $2400 (should mirror single-screen lower)
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x24);
+        bus.write(0x2006, 0x10);
+        let _ = bus.read(0x2007);
+        let v = bus.read(0x2007);
+        assert_eq!(v, 0xC3);
+        // Also $2C00 should mirror
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x2C);
+        bus.write(0x2006, 0x10);
+        let _ = bus.read(0x2007);
+        let v2 = bus.read(0x2007);
+        assert_eq!(v2, 0xC3);
+    }
+
+    #[test]
+    fn mmc1_dynamic_single_screen_upper() {
+        // Control bits 0b00001 => single-screen upper ($2400 region everywhere)
+        let rom = build_mmc1_ines(1, 1, 0x10, 0x00, 1);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        mmc1_serial_write(&mut bus, 0b00001);
+
+        // Write to $2400
+        bus.write(0x2006, 0x24);
+        bus.write(0x2006, 0x10);
+        bus.write(0x2007, 0xD4);
+
+        // Read from $2000 should mirror $2400 in single-screen upper
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x10);
+        let _ = bus.read(0x2007);
+        let v = bus.read(0x2007);
+        assert_eq!(v, 0xD4);
+        // $2C00 also mirrors
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x2C);
+        bus.write(0x2006, 0x10);
+        let _ = bus.read(0x2007);
+        let v2 = bus.read(0x2007);
+        assert_eq!(v2, 0xD4);
+    }
+    #[test]
+    fn mmc3_dynamic_mirroring_vertical_then_horizontal() {
+        // Mapper 4 (MMC3). Set mapper id low nibble = 4 (flags6 upper nibble).
+        // flags6: 0x40 => mapper low nibble=4, horizontal header mirroring (bit0=0)
+        let flags6 = 0x40;
+        let flags7 = 0x00;
+        let rom = build_ines(2, 1, flags6, flags7, 1, None);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        // First force Vertical mirroring via $A000 write (bit0=0)
+        bus.write(0xA000, 0x00);
+
+        // Write a byte to $2000
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x05);
+        bus.write(0x2007, 0x9A);
+
+        // In vertical mode $2800 mirrors $2000
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x28);
+        bus.write(0x2006, 0x05);
+        let _ = bus.read(0x2007);
+        let v_vert = bus.read(0x2007);
+        assert_eq!(
+            v_vert, 0x9A,
+            "Vertical mirroring: $2800 should mirror $2000"
+        );
+
+        // Now switch to Horizontal mirroring (bit0=1)
+        bus.write(0xA000, 0x01);
+
+        // Overwrite $2000 with a different value
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x05);
+        bus.write(0x2007, 0x6E);
+
+        // In horizontal mode $2400 mirrors $2000
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x24);
+        bus.write(0x2006, 0x05);
+        let _ = bus.read(0x2007);
+        let v_horiz = bus.read(0x2007);
+        assert_eq!(
+            v_horiz, 0x6E,
+            "Horizontal mirroring: $2400 should mirror $2000"
+        );
+    }
+
+    #[test]
+    fn mmc3_dynamic_mirroring_switch_back() {
+        // Start with vertical, switch to horizontal, then back to vertical again.
+        let flags6 = 0x40; // mapper id low nibble = 4
+        let flags7 = 0x00;
+        let rom = build_ines(2, 1, flags6, flags7, 1, None);
+        let cart = Cartridge::from_ines_bytes(&rom).expect("parse");
+        let mut bus = Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Vertical
+        bus.write(0xA000, 0x00);
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x33);
+        bus.write(0x2007, 0x11);
+
+        // Confirm vertical ($2800 mirror)
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x28);
+        bus.write(0x2006, 0x33);
+        let _ = bus.read(0x2007);
+        assert_eq!(bus.read(0x2007), 0x11);
+
+        // Horizontal
+        bus.write(0xA000, 0x01);
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x44);
+        bus.write(0x2007, 0x22);
+
+        // Confirm horizontal ($2400 mirror)
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x24);
+        bus.write(0x2006, 0x44);
+        let _ = bus.read(0x2007);
+        assert_eq!(bus.read(0x2007), 0x22);
+
+        // Back to Vertical
+        bus.write(0xA000, 0x00);
+        bus.write(0x2006, 0x20);
+        bus.write(0x2006, 0x55);
+        bus.write(0x2007, 0x33);
+
+        let _ = bus.read(0x2002);
+        bus.write(0x2006, 0x28);
+        bus.write(0x2006, 0x55);
+        let _ = bus.read(0x2007);
+        assert_eq!(bus.read(0x2007), 0x33);
     }
 }
