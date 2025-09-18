@@ -1,46 +1,36 @@
 /*!
-PPU stub exposing register read/write and OAM DMA hook, plus simple timing and NMI signaling.
+PPU implementation (Phase A) providing:
+- CPU-visible register interface ($2000..$2007)
+- OAM (sprite) memory and DMA hook
+- Basic timing (scanline/dot counters) with vblank + NMI signaling
+- Background tile rendering into an RGBA framebuffer
+- Frame-level (non cycle-accurate) sprite rendering overlay (Phase A)
+- Approximate sprite zero hit & sprite overflow flag behavior
 
-Scope:
-- Implements the CPU-visible PPU register interface ($2000..$2007) with basic,
-  but useful, semantics:
-  * $2000 PPUCTRL: stores control flags (incl. VRAM increment and NMI enable)
-  * $2001 PPUMASK: stores mask flags (color emphasis, greyscale, show bg/sprites)
-  * $2002 PPUSTATUS: exposes vblank/sprite flags; read clears vblank and write latch
-  * $2003 OAMADDR: OAM address pointer for $2004
-  * $2004 OAMDATA: read/write OAM at OAMADDR (writes increment OAMADDR)
-  * $2005 PPUSCROLL: two writes form x/y scroll; affects internal write toggle
-  * $2006 PPUADDR: two writes set VRAM address; read of $2002 resets the write toggle
-  * $2007 PPUDATA: VRAM read/write at current VRAM address; auto-increment via $2000
-- Provides a simple VRAM space (0x0000..0x3FFF mirrored) and OAM (256 bytes).
-- Implements buffered reads for $2007 (non-palette addresses return delayed value).
-- Exposes an OAM DMA helper for $4014 handling in the Bus.
-- Adds simple dot/scanline/frame timing and signals NMI on vblank if enabled.
+NOTES / LIMITATIONS (Phase A):
+- No fine-scroll or scrolling across multiple nametables (only base $2000 nametable).
+- Sprite rendering is done after the full background pass (not per-scanline).
+- Sprite zero hit timing is approximate: flag is set if a non-transparent sprite-0 pixel
+  overlays a non-zero background pixel in the final composed frame.
+- Sprite overflow is approximated: if more than 8 sprites overlap any scanline, flag is set.
+- PPUSTATUS bits for sprite zero (bit 6) and overflow (bit 5) are thus approximate.
+- Pattern table / palette mirroring behavior is simplified.
+- Future Phase B should introduce per-scanline evaluation, cycle-level timing, and precise flags.
 
-Notes:
-- This is still a functional stub, not cycle-accurate. It aims to support CPU-side
-  software interactions and provide a place to evolve full PPU behavior later.
-- Palette mirroring and nametable mirroring are not fully modeled. VRAM is a flat
-  16KB space to keep things simple at this stage.
-
-Additions (display integration groundwork):
-- A persistent RGBA framebuffer (`framebuffer`) sized 256x240x4 for integration
-  with a future `pixels` / GPU-backed display layer.
-- A `render_frame` method that (for now) produces a placeholder pattern using
-  the canonical NES palette. This will be replaced with real background &
-  sprite composition logic later.
+STRUCTURE:
+- `Ppu` holds all state (register mirrors, VRAM, OAM, frame buffer, background opacity mask).
+- `render_frame` performs a full background draw + sprite overlay.
+- `tick` advances coarse timing (3 ticks per CPU cycle expected via bus integration).
 */
 
-/// Width of the logical NES screen in pixels.
+/// Screen width in pixels.
 pub const NES_WIDTH: usize = 256;
-/// Height of the logical NES screen in pixels.
+/// Screen height in pixels.
 pub const NES_HEIGHT: usize = 240;
-/// Bytes per pixel (RGBA8888).
+/// RGBA bytes per pixel.
 pub const BYTES_PER_PIXEL: usize = 4;
 
-/// Canonical 64-entry NES palette (RGB; alpha supplied separately). Values are
-/// a commonly used approximation; exact analog hardware output varied by TV.
-/// Source palette adapted from public domain reference tables.
+/// Canonical (approximate) NES master palette (RGB; alpha always 0xFF when rendered).
 const NES_PALETTE: [[u8; 3]; 64] = [
     [0x75, 0x75, 0x75],
     [0x27, 0x1B, 0x8F],
@@ -110,33 +100,36 @@ const NES_PALETTE: [[u8; 3]; 64] = [
 
 #[derive(Clone, Debug)]
 pub struct Ppu {
-    // Registers (CPU visible)
-    ctrl: u8,     // $2000 PPUCTRL
-    mask: u8,     // $2001 PPUMASK
-    status: u8,   // $2002 PPUSTATUS (bit7=vblank, bit6=sprite0 hit, bit5=sprite overflow)
-    oam_addr: u8, // $2003 OAMADDR
+    // CPU-visible register mirrors
+    ctrl: u8,     // $2000
+    mask: u8,     // $2001
+    status: u8,   // $2002 (bit7=vblank, bit6=sprite0 hit, bit5=sprite overflow)
+    oam_addr: u8, // $2003
 
-    // Internal latches and toggles
-    write_toggle: bool, // toggles on $2005/$2006 writes; reset on $2002 read
-    scroll_x: u8,       // first write to $2005
-    scroll_y: u8,       // second write to $2005
+    // Write toggle + scroll latches
+    write_toggle: bool,
+    scroll_x: u8,
+    scroll_y: u8,
 
-    // VRAM addressing
-    vram_addr: u16,     // current VRAM address (15 bits used)
-    vram_buffer: u8,    // read buffer for $2007 (non-palette)
-    vram: [u8; 0x4000], // Simple VRAM stub (0x0000..0x3FFF)
+    // VRAM addressing & buffered read
+    vram_addr: u16,
+    vram_buffer: u8,
+    vram: [u8; 0x4000], // Simple 16KB VRAM (pattern + nametable + palette space mirrored)
 
-    // OAM (Object Attribute Memory)
-    oam: [u8; 256], // 256 bytes OAM
+    // OAM (Object Attribute Memory) 64 sprites * 4 bytes
+    oam: [u8; 256],
 
     // Timing
-    dot: u16,      // 0..=340
-    scanline: i16, // -1 (pre-render), 0..=260; 241..=260 vblank period
+    dot: u16,
+    scanline: i16,
     frame_complete: bool,
     nmi_latch: bool,
 
-    // New: RGBA framebuffer for display integration (lazy initialized).
+    // Output framebuffer (RGBA)
     framebuffer: Vec<u8>,
+
+    // Background opacity per pixel (1 if bg color index != 0)
+    bg_opaque: Vec<u8>,
 }
 
 impl Default for Ppu {
@@ -164,6 +157,7 @@ impl Ppu {
             frame_complete: false,
             nmi_latch: false,
             framebuffer: Vec::new(),
+            bg_opaque: Vec::new(),
         }
     }
 
@@ -183,129 +177,233 @@ impl Ppu {
         self.scanline = -1;
         self.frame_complete = false;
         self.nmi_latch = false;
-        // Preserve framebuffer allocation to avoid realloc churn.
+        // Keep framebuffer allocations (avoid churn)
     }
 
-    /// Access the current RGBA framebuffer (length = 256*240*4).
+    /// Read-only framebuffer slice (RGBA).
     pub fn framebuffer(&self) -> &[u8] {
         &self.framebuffer
     }
 
-    /// Render the current PPU state into the internal RGBA framebuffer.
-    ///
-    /// Current implementation: background tile renderer (no fine scroll, no sprites).
-    /// - Renders the 32x30 tile grid from nametable $2000.
-    /// - Applies attribute table palette selection for each 2x2 tile group.
-    /// - Uses background pattern table selected by PPUCTRL bit 4 (0=0x0000,1=0x1000).
-    /// - Universal background color ($3F00) used when tile pixel color index == 0.
-    /// Future enhancements: fine scroll, additional nametables, sprite layer, emphasis/greyscale.
+    /// Render a full frame (background + sprite overlay).
+    /// Non-cycle-accurate. Background first, then sprites.
     pub fn render_frame<B: crate::ppu_bus::PpuBus>(&mut self, bus: &B) {
         let needed = NES_WIDTH * NES_HEIGHT * BYTES_PER_PIXEL;
         if self.framebuffer.len() != needed {
             self.framebuffer.resize(needed, 0);
         }
-        // Clear (optional – background fully overwritten, but keep for safety if future partial updates)
-        // self.framebuffer.fill(0);
+        if self.bg_opaque.len() != NES_WIDTH * NES_HEIGHT {
+            self.bg_opaque.resize(NES_WIDTH * NES_HEIGHT, 0);
+        } else {
+            self.bg_opaque.fill(0);
+        }
 
-        // Determine background pattern table base (PPUCTRL bit 4)
-        let pattern_base = if (self.ctrl & 0x10) != 0 {
+        // Background pattern table base (PPUCTRL bit 4)
+        let bg_pattern_base = if (self.ctrl & 0x10) != 0 {
             0x1000
         } else {
             0x0000
         };
 
-        // Precompute RGBA palette table for quick lookup (cache inside function for now)
-        // Convert NES palette indexes (0..63) into RGBA
+        // Palette RGBA cache
         let mut rgba_cache = [[0u8; 4]; 64];
         for i in 0..64 {
-            let rgb = NES_PALETTE[i];
-            rgba_cache[i] = [rgb[0], rgb[1], rgb[2], 0xFF];
+            let c = NES_PALETTE[i];
+            rgba_cache[i] = [c[0], c[1], c[2], 0xFF];
         }
 
-        // Iterate tiles by scanline row (tile_y), then tile row (row_in_tile) for cache friendliness.
+        // Background: iterate tiles then inside tile rows
         for tile_y in 0..30 {
-            // Attribute table row index components reused across 8-pixel rows in this tile row batch.
-            let coarse_attr_y = tile_y / 4; // 0..7
-            let attr_row_quadrant_y = (tile_y % 4) / 2; // 0 or 1 within attribute byte
+            let coarse_attr_y = tile_y / 4;
+            let attr_row_quad_y = (tile_y % 4) / 2;
             for row_in_tile in 0..8 {
-                let pixel_y = tile_y * 8 + row_in_tile;
-                if pixel_y >= NES_HEIGHT {
+                let py = tile_y * 8 + row_in_tile;
+                if py >= NES_HEIGHT {
                     continue;
                 }
-
                 for tile_x in 0..32 {
-                    let pixel_x_base = tile_x * 8;
-                    if pixel_x_base >= NES_WIDTH {
+                    let px_base = tile_x * 8;
+                    if px_base >= NES_WIDTH {
                         continue;
                     }
 
-                    // Fetch tile id from nametable $2000 + tile_y*32 + tile_x
-                    let nametable_index = 0x2000 + (tile_y as u16) * 32 + tile_x as u16;
-                    let tile_id = bus.ppu_read(nametable_index);
+                    let nt_index = 0x2000 + (tile_y as u16) * 32 + tile_x as u16;
+                    let tile_id = bus.ppu_read(nt_index);
 
-                    // Attribute table: base $23C0, index formed by (tile_y/4)*8 + (tile_x/4)
                     let attr_index = 0x23C0 + (coarse_attr_y as u16) * 8 + (tile_x as u16 / 4);
                     let attr_byte = bus.ppu_read(attr_index);
-
-                    // Determine palette group (2 bits) based on quadrant inside 4x4 tile block
-                    let attr_quadrant_x = (tile_x % 4) / 2; // 0 or 1
-                    let quadrant = (attr_row_quadrant_y * 2) + attr_quadrant_x; // 0..3
+                    let attr_quad_x = (tile_x % 4) / 2;
+                    let quadrant = attr_row_quad_y * 2 + attr_quad_x;
                     let palette_group = (attr_byte >> (quadrant * 2)) & 0x03;
 
-                    // Fetch pattern bytes for this tile row
-                    let pattern_addr = pattern_base + (tile_id as u16) * 16 + row_in_tile as u16;
+                    let pattern_addr = bg_pattern_base + (tile_id as u16) * 16 + row_in_tile as u16;
                     let low_plane = bus.ppu_read(pattern_addr);
                     let high_plane = bus.ppu_read(pattern_addr + 8);
 
                     for bit in 0..8 {
-                        let x = pixel_x_base + bit;
+                        let x = px_base + bit;
                         if x >= NES_WIDTH {
                             break;
                         }
-
                         let shift = 7 - bit;
                         let lo = (low_plane >> shift) & 1;
                         let hi = (high_plane >> shift) & 1;
-                        let color_index = (hi << 1) | lo; // 0..3
-
-                        // Select final NES palette byte
-                        let nes_palette_entry = if color_index == 0 {
-                            // Universal background color ($3F00)
+                        let ci = (hi << 1) | lo; // 0..3
+                        let nes_palette_entry = if ci == 0 {
                             bus.ppu_read(0x3F00)
                         } else {
-                            // Background subpalette: base = palette_group * 4
-                            let pal_addr = 0x3F00 + (palette_group as u16) * 4 + color_index as u16;
-                            bus.ppu_read(pal_addr)
+                            let pal = 0x3F00 + (palette_group as u16) * 4 + ci as u16;
+                            bus.ppu_read(pal)
                         } & 0x3F;
 
+                        let fi = (py * NES_WIDTH + x) * BYTES_PER_PIXEL;
                         let rgba = rgba_cache[nes_palette_entry as usize];
-                        let fb_index = (pixel_y * NES_WIDTH + x) * BYTES_PER_PIXEL;
-                        self.framebuffer[fb_index] = rgba[0];
-                        self.framebuffer[fb_index + 1] = rgba[1];
-                        self.framebuffer[fb_index + 2] = rgba[2];
-                        self.framebuffer[fb_index + 3] = 0xFF;
+                        self.framebuffer[fi] = rgba[0];
+                        self.framebuffer[fi + 1] = rgba[1];
+                        self.framebuffer[fi + 2] = rgba[2];
+                        self.framebuffer[fi + 3] = 0xFF;
+
+                        if ci != 0 {
+                            self.bg_opaque[py * NES_WIDTH + x] = 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Approximate sprite overflow (count per scanline > 8)
+        let mut scan_counts = [0u8; NES_HEIGHT];
+        let spr_h = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+        for s in 0..64 {
+            let base = s * 4;
+            let y = self.oam[base] as i16;
+            let top = y as i32;
+            let bottom = top + spr_h as i32;
+            if bottom <= 0 || top >= NES_HEIGHT as i32 {
+                continue;
+            }
+            for sy in top.max(0) as usize..bottom.min(NES_HEIGHT as i32) as usize {
+                if scan_counts[sy] < 250 {
+                    scan_counts[sy] += 1;
+                    if scan_counts[sy] > 8 {
+                        self.set_sprite_overflow(true);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // If sprites disabled (PPUMASK bit 4), skip overlay
+        if (self.mask & 0x10) == 0 {
+            return;
+        }
+
+        // Sprite overlay: iterate in reverse so lower OAM index is drawn last (higher priority).
+        for sprite_index in (0..64).rev() {
+            let base = sprite_index * 4;
+            let y = self.oam[base] as i16;
+            let tile = self.oam[base + 1];
+            let attr = self.oam[base + 2];
+            let x = self.oam[base + 3] as i16;
+
+            let flip_v = (attr & 0x80) != 0;
+            let flip_h = (attr & 0x40) != 0;
+            let priority_behind_bg = (attr & 0x20) != 0;
+            let palette_index = (attr & 0x03) as u16;
+
+            let sprite_height = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
+
+            // Simple bounding reject
+            if x >= NES_WIDTH as i16
+                || y >= NES_HEIGHT as i16
+                || x < -(sprite_height as i16)
+                || y < -(sprite_height as i16)
+            {
+                continue;
+            }
+
+            for row in 0..sprite_height {
+                let sy = y + row as i16;
+                if sy < 0 || sy >= NES_HEIGHT as i16 {
+                    continue;
+                }
+
+                // Pattern addressing (8x8 vs 8x16)
+                let (addr_low, addr_high) = if sprite_height == 8 {
+                    let base_sel = if (self.ctrl & 0x08) != 0 {
+                        0x1000
+                    } else {
+                        0x0000
+                    };
+                    let eff_row = if flip_v { 7 - row } else { row } & 7;
+                    let a = base_sel + (tile as u16) * 16 + eff_row as u16;
+                    (a, a + 8)
+                } else {
+                    // 8x16
+                    let table = (tile as u16 & 1) * 0x1000;
+                    let base_tile = (tile & 0xFE) as u16;
+                    let row_in_sprite = if flip_v {
+                        (sprite_height - 1 - row)
+                    } else {
+                        row
+                    };
+                    let tile_select = if row_in_sprite < 8 { 0 } else { 1 };
+                    let row_in_tile = row_in_sprite & 7;
+                    let a = table + (base_tile + tile_select) * 16 + row_in_tile as u16;
+                    (a, a + 8)
+                };
+
+                let low_plane = bus.ppu_read(addr_low);
+                let high_plane = bus.ppu_read(addr_high);
+
+                for col in 0..8 {
+                    let sx = x + col as i16;
+                    if sx < 0 || sx >= NES_WIDTH as i16 {
+                        continue;
+                    }
+                    let bit_index = if flip_h { col } else { 7 - col };
+                    let lo = (low_plane >> bit_index) & 1;
+                    let hi = (high_plane >> bit_index) & 1;
+                    let ci = (hi << 1) | lo;
+                    if ci == 0 {
+                        continue; // transparent
+                    }
+
+                    let bg_is_opaque = self.bg_opaque[sy as usize * NES_WIDTH + sx as usize] != 0;
+                    if priority_behind_bg && bg_is_opaque {
+                        continue;
+                    }
+
+                    let pal_addr = 0x3F10 + palette_index * 4 + ci as u16;
+                    let nes_palette_entry = bus.ppu_read(pal_addr) & 0x3F;
+                    let rgba = rgba_cache[nes_palette_entry as usize];
+                    let fi = (sy as usize * NES_WIDTH + sx as usize) * BYTES_PER_PIXEL;
+                    self.framebuffer[fi] = rgba[0];
+                    self.framebuffer[fi + 1] = rgba[1];
+                    self.framebuffer[fi + 2] = rgba[2];
+                    self.framebuffer[fi + 3] = 0xFF;
+
+                    if sprite_index == 0 && bg_is_opaque {
+                        self.set_sprite_zero_hit(true);
                     }
                 }
             }
         }
     }
 
-    // Advance PPU by one dot (called 3x per CPU cycle via Bus.tick).
-    // Signals NMI via Bus at vblank start if enabled.
+    /// Advance one PPU dot (should be invoked 3x per CPU cycle by the bus).
     pub fn tick(&mut self) {
-        if self.dot == 0 {
-            // Start of dot
-        }
-
         self.dot = self.dot.wrapping_add(1);
 
         if self.dot == 1 {
             if self.scanline == 241 {
+                // Entering vblank
                 self.set_vblank(true);
                 if self.nmi_enabled() {
                     self.nmi_latch = true;
                 }
             } else if self.scanline == -1 {
+                // Pre-render line: clear flags
                 self.set_vblank(false);
                 self.set_sprite_zero_hit(false);
                 self.set_sprite_overflow(false);
@@ -316,7 +414,6 @@ impl Ppu {
         if self.dot >= 341 {
             self.dot = 0;
             self.scanline += 1;
-
             if self.scanline > 260 {
                 self.scanline = -1;
                 self.frame_complete = true;
@@ -324,20 +421,16 @@ impl Ppu {
         }
     }
 
-    // CPU write to PPU register in $2000..$2007
+    /// Write CPU-facing PPU register ($2000..$2007).
     pub fn write_reg(&mut self, addr: u16, value: u8) {
-        let reg = 0x2000 + (addr & 0x0007);
+        let reg = 0x2000 + (addr & 0x7);
         match reg {
             0x2000 => {
                 self.ctrl = value;
             }
-            0x2001 => {
-                self.mask = value;
-            }
-            0x2002 => { /* ignored */ }
-            0x2003 => {
-                self.oam_addr = value;
-            }
+            0x2001 => self.mask = value,
+            0x2002 => { /* read-only */ }
+            0x2003 => self.oam_addr = value,
             0x2004 => {
                 let idx = self.oam_addr as usize;
                 self.oam[idx] = value;
@@ -363,8 +456,8 @@ impl Ppu {
                 }
             }
             0x2007 => {
-                let addr = (self.vram_addr & 0x3FFF) as usize;
-                self.vram[addr] = value;
+                let a = (self.vram_addr & 0x3FFF) as usize;
+                self.vram[a] = value;
                 let inc = if (self.ctrl & 0x04) != 0 { 32 } else { 1 };
                 self.vram_addr = self.vram_addr.wrapping_add(inc) & 0x3FFF;
             }
@@ -372,29 +465,27 @@ impl Ppu {
         }
     }
 
-    // CPU read from PPU register in $2000..$2007
+    /// Read CPU-facing PPU register ($2000..$2007).
     pub fn read_reg(&mut self, addr: u16) -> u8 {
-        let reg = 0x2000 + (addr & 0x0007);
+        let reg = 0x2000 + (addr & 0x7);
         match reg {
             0x2000 => self.ctrl,
             0x2001 => self.mask,
             0x2002 => {
-                let result = self.status;
-                self.status &= !0x80;
+                let v = self.status;
+                self.status &= !0x80; // Clear vblank
                 self.write_toggle = false;
-                result
+                v
             }
             0x2003 => self.oam_addr,
-            0x2004 => {
-                let idx = self.oam_addr as usize;
-                self.oam[idx]
-            }
+            0x2004 => self.oam[self.oam_addr as usize],
             0x2005 => 0,
             0x2006 => ((self.vram_addr >> 8) & 0xFF) as u8,
             0x2007 => {
-                let addr = self.vram_addr & 0x3FFF;
-                let value = self.vram[addr as usize];
-                let ret = if addr < 0x3F00 {
+                let a = self.vram_addr & 0x3FFF;
+                let value = self.vram[a as usize];
+                let ret = if a < 0x3F00 {
+                    // buffered read
                     let out = self.vram_buffer;
                     self.vram_buffer = value;
                     out
@@ -409,16 +500,18 @@ impl Ppu {
         }
     }
 
+    /// OAM DMA copy (256 bytes).
     pub fn oam_dma_copy(&mut self, data: &[u8]) {
-        let mut addr = self.oam_addr;
+        let mut oam_ptr = self.oam_addr;
         for i in 0..256 {
-            let byte = data.get(i).copied().unwrap_or(0);
-            self.oam[addr as usize] = byte;
-            addr = addr.wrapping_add(1);
+            let b = data.get(i).copied().unwrap_or(0);
+            self.oam[oam_ptr as usize] = b;
+            oam_ptr = oam_ptr.wrapping_add(1);
         }
-        self.oam_addr = addr;
+        self.oam_addr = oam_ptr;
     }
 
+    // Flag setters
     pub fn set_vblank(&mut self, on: bool) {
         if on {
             self.status |= 0x80;
@@ -441,6 +534,7 @@ impl Ppu {
         }
     }
 
+    // Flag queries
     pub fn vblank(&self) -> bool {
         (self.status & 0x80) != 0
     }
@@ -450,18 +544,17 @@ impl Ppu {
     pub fn sprite_overflow(&self) -> bool {
         (self.status & 0x20) != 0
     }
-
     pub fn nmi_enabled(&self) -> bool {
         (self.ctrl & 0x80) != 0
     }
 
+    // VRAM/OAM convenience
     pub fn peek_vram(&self, addr: u16) -> u8 {
         self.vram[(addr as usize) & 0x3FFF]
     }
     pub fn poke_vram(&mut self, addr: u16, value: u8) {
         self.vram[(addr as usize) & 0x3FFF] = value;
     }
-
     pub fn peek_oam(&self, idx: usize) -> u8 {
         self.oam[idx & 0xFF]
     }
@@ -469,6 +562,7 @@ impl Ppu {
         self.oam[idx & 0xFF] = value;
     }
 
+    // Frame completion & NMI latch
     pub fn frame_complete(&self) -> bool {
         self.frame_complete
     }
@@ -477,37 +571,34 @@ impl Ppu {
         self.frame_complete = false;
         was
     }
-
     pub fn take_nmi_request(&mut self) -> bool {
         let was = self.nmi_latch;
         self.nmi_latch = false;
         was
     }
 
+    // Misc register access helpers (used elsewhere in crate)
     pub fn get_ctrl(&self) -> u8 {
         self.ctrl
     }
-    pub fn set_ctrl(&mut self, value: u8) {
-        self.ctrl = value;
+    pub fn set_ctrl(&mut self, v: u8) {
+        self.ctrl = v;
     }
     pub fn vram_increment_step(&self) -> u16 {
         if (self.ctrl & 0x04) != 0 { 32 } else { 1 }
     }
-
     pub fn get_vram_addr(&self) -> u16 {
         self.vram_addr
     }
-    pub fn set_vram_addr(&mut self, addr: u16) {
-        self.vram_addr = addr & 0x3FFF;
+    pub fn set_vram_addr(&mut self, a: u16) {
+        self.vram_addr = a & 0x3FFF;
     }
-
     pub fn get_vram_buffer(&self) -> u8 {
         self.vram_buffer
     }
-    pub fn set_vram_buffer(&mut self, value: u8) {
-        self.vram_buffer = value;
+    pub fn set_vram_buffer(&mut self, v: u8) {
+        self.vram_buffer = v;
     }
-
     pub fn get_write_toggle(&self) -> bool {
         self.write_toggle
     }
@@ -522,120 +613,107 @@ mod tests {
 
     #[test]
     fn status_read_clears_vblank_and_write_toggle() {
-        let mut ppu = Ppu::new();
-        ppu.set_vblank(true);
-        ppu.write_toggle = true;
-
-        let s = ppu.read_reg(0x2002);
+        let mut p = Ppu::new();
+        p.set_vblank(true);
+        p.write_toggle = true;
+        let s = p.read_reg(0x2002);
         assert_ne!(s & 0x80, 0);
-        assert!(!ppu.vblank());
-        assert!(!ppu.write_toggle);
+        assert!(!p.vblank());
+        assert!(!p.get_write_toggle());
     }
 
     #[test]
     fn ppudata_buffered_read_and_increment() {
-        let mut ppu = Ppu::new();
-        ppu.write_reg(0x2000, 0x00);
-
-        ppu.vram[0x0000] = 0x11;
-        ppu.vram[0x0001] = 0x22;
-
-        ppu.write_reg(0x2006, 0x00);
-        ppu.write_reg(0x2006, 0x00);
-
-        assert_eq!(ppu.read_reg(0x2007), 0x00);
-        assert_eq!(ppu.read_reg(0x2007), 0x11);
-        assert_eq!(ppu.read_reg(0x2007), 0x22);
+        let mut p = Ppu::new();
+        p.write_reg(0x2000, 0x00);
+        p.vram[0x0000] = 0x11;
+        p.vram[0x0001] = 0x22;
+        p.write_reg(0x2006, 0x00);
+        p.write_reg(0x2006, 0x00);
+        assert_eq!(p.read_reg(0x2007), 0x00); // buffered
+        assert_eq!(p.read_reg(0x2007), 0x11);
+        assert_eq!(p.read_reg(0x2007), 0x22);
     }
 
     #[test]
     fn oam_dma_writes_wrap_and_update_oamaddr() {
-        let mut ppu = Ppu::new();
-        ppu.write_reg(0x2003, 0xFE);
-
+        let mut p = Ppu::new();
+        p.write_reg(0x2003, 0xFE);
         let mut buf = [0u8; 256];
         for i in 0..256 {
             buf[i] = i as u8;
         }
-        ppu.oam_dma_copy(&buf);
-
-        assert_eq!(ppu.peek_oam(0xFE), 0x00);
-        assert_eq!(ppu.peek_oam(0xFF), 0x01);
-        assert_eq!(ppu.peek_oam(0x00), 0x02);
-        assert_eq!(ppu.peek_oam(0x01), 0x03);
-        assert_eq!(ppu.read_reg(0x2003), 0xFE);
+        p.oam_dma_copy(&buf);
+        assert_eq!(p.peek_oam(0xFE), 0x00);
+        assert_eq!(p.peek_oam(0xFF), 0x01);
+        assert_eq!(p.peek_oam(0x00), 0x02);
+        assert_eq!(p.peek_oam(0x01), 0x03);
+        assert_eq!(p.read_reg(0x2003), 0xFE);
     }
 
     #[test]
     fn framebuffer_dimensions_background_renderer() {
-        let mut ppu = Ppu::new();
+        let mut p = Ppu::new();
         let bus = crate::bus::Bus::new();
-        ppu.render_frame(&bus);
+        p.render_frame(&bus);
         assert_eq!(
-            ppu.framebuffer.len(),
+            p.framebuffer().len(),
             NES_WIDTH * NES_HEIGHT * BYTES_PER_PIXEL
         );
     }
 
     #[test]
     fn background_single_tile_basic() {
-        // Cartridge with CHR RAM (0 CHR banks) for writable pattern table
-        let flags6 = 0u8;
-        let flags7 = 0u8;
-        let rom = crate::test_utils::build_ines(1, 0, flags6, flags7, 1, None);
-        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).expect("parse");
+        // Build cart with CHR RAM (0 CHR banks => writable pattern table)
+        let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
+        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
         let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
-        // Tile 0 pattern: all pixels color index 1 (low plane=0xFF, high plane=0x00)
+        // Tile 0 pattern: all pixels color index 1 (low=0xFF, high=0x00)
         for row in 0..8 {
-            bus.ppu_write(0x0000 + row as u16, 0xFF); // low plane
-            bus.ppu_write(0x0000 + 8 + row as u16, 0x00); // high plane
+            bus.ppu_write(0x0000 + row as u16, 0xFF);
+            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
         }
-        // Nametable entry (0,0) = tile 0
+        // Name table top-left tile = 0
         bus.ppu_write(0x2000, 0x00);
-        // Attribute table top-left entry = 0 (palette group 0)
-        bus.ppu_write(0x23C0, 0x00);
-        // Palette: universal background at $3F00 (ignored for index!=0), subpalette 0 color1 at $3F01
+        bus.ppu_write(0x23C0, 0x00); // attributes
+        // Palette: universal + color1
         bus.ppu_write(0x3F00, 0x00);
-        bus.ppu_write(0x3F01, 0x03); // pick a known palette entry
+        bus.ppu_write(0x3F01, 0x03);
 
-        // Render then release mutable borrow before accessing framebuffer
-        // Render and clone framebuffer while holding a single mutable borrow.
         bus.render_ppu_frame();
         let fb = bus.ppu().framebuffer();
-        let expected_rgb = NES_PALETTE[0x03];
-        assert_eq!(fb[0], expected_rgb[0]);
-        assert_eq!(fb[1], expected_rgb[1]);
-        assert_eq!(fb[2], expected_rgb[2]);
+        let expected = NES_PALETTE[0x03];
+        assert_eq!(fb[0], expected[0]);
+        assert_eq!(fb[1], expected[1]);
+        assert_eq!(fb[2], expected[2]);
         assert_eq!(fb[3], 0xFF);
     }
 
     #[test]
     fn background_attribute_quadrants() {
-        // CHR RAM cart
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
-        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).expect("parse");
+        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
         let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
-        // Tile pattern (tile 0) constant color index 1
+        // Tile pattern 0: color index 1
         for row in 0..8 {
             bus.ppu_write(0x0000 + row as u16, 0xFF);
             bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
         }
-        // Place tile 0 at positions (0,0), (2,0), (0,2), (2,2) within the first 4x4 tile attribute block.
-        let coords = [(0u16, 0u16), (2, 0), (0, 2), (2, 2)];
-        for &(tx, ty) in &coords {
-            let index = 0x2000 + ty * 32 + tx;
-            bus.ppu_write(index, 0x00);
+        // Place tile 0 at four quadrants within first attribute block
+        for &(tx, ty) in &[(0u16, 0u16), (2, 0), (0, 2), (2, 2)] {
+            let nt = 0x2000 + ty * 32 + tx;
+            bus.ppu_write(nt, 0x00);
         }
-        // Attribute byte: TL=palette0 (00), TR=palette1 (01), BL=palette2 (10), BR=palette3 (11)
-        let attr_value = (3 << 6) | (2 << 4) | (1 << 2);
-        bus.ppu_write(0x23C0, attr_value);
+        // Attribute: TL=0, TR=1, BL=2, BR=3
+        let attr = (3 << 6) | (2 << 4) | (1 << 2);
+        bus.ppu_write(0x23C0, attr);
 
-        // Palette entries for color index=1 in each subpalette
-        bus.ppu_write(0x3F00, 0x00); // universal
+        // Palettes
+        bus.ppu_write(0x3F00, 0x00);
         bus.ppu_write(0x3F01, 0x01); // palette0 color1
         bus.ppu_write(0x3F05, 0x02); // palette1 color1
         bus.ppu_write(0x3F09, 0x03); // palette2 color1
@@ -644,20 +722,145 @@ mod tests {
         bus.render_ppu_frame();
         let fb = bus.ppu().framebuffer();
 
-        let check = |tile_x: usize, tile_y: usize, expect_palette_index: usize| {
+        let check = |tile_x: usize, tile_y: usize, pal_idx: usize| {
             let x = tile_x * 8;
             let y = tile_y * 8;
-            let idx = (y * NES_WIDTH + x) * BYTES_PER_PIXEL;
-            let expected = NES_PALETTE[expect_palette_index];
-            assert_eq!(fb[idx], expected[0]);
-            assert_eq!(fb[idx + 1], expected[1]);
-            assert_eq!(fb[idx + 2], expected[2]);
-            assert_eq!(fb[idx + 3], 0xFF);
+            let pix = (y * NES_WIDTH + x) * BYTES_PER_PIXEL;
+            let expected = NES_PALETTE[pal_idx];
+            assert_eq!(fb[pix], expected[0]);
+            assert_eq!(fb[pix + 1], expected[1]);
+            assert_eq!(fb[pix + 2], expected[2]);
+            assert_eq!(fb[pix + 3], 0xFF);
         };
+        check(0, 0, 0x01);
+        check(2, 0, 0x02);
+        check(0, 2, 0x03);
+        check(2, 2, 0x04);
+    }
 
-        check(0, 0, 0x01); // TL palette0
-        check(2, 0, 0x02); // TR palette1
-        check(0, 2, 0x03); // BL palette2
-        check(2, 2, 0x04); // BR palette3
+    #[test]
+    fn sprite_basic_overlay() {
+        let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
+        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
+        let mut bus = crate::bus::Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Background tile 0: color index 1
+        for row in 0..8 {
+            bus.ppu_write(0x0000 + row as u16, 0xFF);
+            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
+        }
+        bus.ppu_write(0x2000, 0x00);
+        bus.ppu_write(0x23C0, 0x00);
+        bus.ppu_write(0x3F00, 0x00);
+        bus.ppu_write(0x3F01, 0x03);
+
+        // Sprite tile 1: ci=3 (low AND high both 0xFF => bits produce 3)
+        for row in 0..8 {
+            bus.ppu_write(0x0010 + row as u16, 0xFF);
+            bus.ppu_write(0x0010 + 8 + row as u16, 0xFF);
+        }
+        // Sprite palette entries (choose a distinct palette color)
+        bus.ppu_write(0x3F10, 0x00);
+        bus.ppu_write(0x3F11, 0x04);
+        bus.ppu_write(0x3F12, 0x05);
+        bus.ppu_write(0x3F13, 0x06);
+
+        // Enable background & sprites
+        bus.ppu_mut().mask = 0x18;
+
+        {
+            let p = bus.ppu_mut();
+            p.oam[0] = 0; // Y
+            p.oam[1] = 1; // tile index
+            p.oam[2] = 0x00; // attributes
+            p.oam[3] = 0; // X
+        }
+
+        bus.render_ppu_frame();
+        let fb = bus.ppu().framebuffer();
+        let expected = NES_PALETTE[0x06];
+        assert_eq!(fb[0], expected[0]);
+        assert_eq!(fb[1], expected[1]);
+        assert_eq!(fb[2], expected[2]);
+    }
+
+    #[test]
+    fn sprite_zero_hit_basic() {
+        let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
+        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
+        let mut bus = crate::bus::Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Background tile 0: color index 1
+        for row in 0..8 {
+            bus.ppu_write(0x0000 + row as u16, 0xFF);
+            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
+        }
+        bus.ppu_write(0x2000, 0x00);
+        bus.ppu_write(0x23C0, 0x00);
+        bus.ppu_write(0x3F00, 0x00);
+        bus.ppu_write(0x3F01, 0x03);
+
+        // Sprite tile 1: solid ci=1 (low=0xFF, high=0x00)
+        for row in 0..8 {
+            bus.ppu_write(0x0010 + row as u16, 0xFF);
+            bus.ppu_write(0x0010 + 8 + row as u16, 0x00);
+        }
+        bus.ppu_write(0x3F10, 0x00);
+        bus.ppu_write(0x3F11, 0x04);
+
+        bus.ppu_mut().mask = 0x18;
+        {
+            let p = bus.ppu_mut();
+            p.oam[0] = 0;
+            p.oam[1] = 1;
+            p.oam[2] = 0x00; // front
+            p.oam[3] = 0;
+        }
+        bus.render_ppu_frame();
+        assert!(bus.ppu().sprite_zero_hit());
+    }
+
+    #[test]
+    fn sprite_priority_behind_background() {
+        let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
+        let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
+        let mut bus = crate::bus::Bus::new();
+        bus.attach_cartridge(cart);
+
+        // Background tile 0: color index 1
+        for row in 0..8 {
+            bus.ppu_write(0x0000 + row as u16, 0xFF);
+            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
+        }
+        bus.ppu_write(0x2000, 0x00);
+        bus.ppu_write(0x23C0, 0x00);
+        bus.ppu_write(0x3F00, 0x00);
+        bus.ppu_write(0x3F01, 0x03);
+
+        // Sprite tile 1: pattern doesn't matter (solid)
+        for row in 0..8 {
+            bus.ppu_write(0x0010 + row as u16, 0xFF);
+            bus.ppu_write(0x0010 + 8 + row as u16, 0x00);
+        }
+        bus.ppu_write(0x3F10, 0x00);
+        bus.ppu_write(0x3F11, 0x04);
+
+        bus.ppu_mut().mask = 0x18;
+        {
+            let p = bus.ppu_mut();
+            p.oam[0] = 0;
+            p.oam[1] = 1;
+            p.oam[2] = 0x20; // behind background
+            p.oam[3] = 0;
+        }
+        bus.render_ppu_frame();
+        // Expect background color at (0,0)
+        let fb = bus.ppu().framebuffer();
+        let expected = NES_PALETTE[0x03];
+        assert_eq!(fb[0], expected[0]);
+        assert_eq!(fb[1], expected[1]);
+        assert_eq!(fb[2], expected[2]);
     }
 }
