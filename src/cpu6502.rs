@@ -1,5 +1,10 @@
 /*!
 Bus-integrated 6502 CPU core
+NOTE: This file is in the process of being decomposed into a modular
+`cpu/` directory (see `src/cpu/`). New development should prefer the
+facade `crate::cpu::Cpu6502` and avoid adding fresh logic here. Once
+the migration (state, addressing, execute, dispatch, table decode)
+reaches parity, this legacy monolithic file will be removed.
 
 Features:
 - 64KiB CPU address space accessed only via Bus
@@ -22,6 +27,32 @@ Note:
 use crate::bus::Bus;
 
 #[allow(dead_code)]
+/* ---------------------------------------------------------------------------
+   Legacy 6502 CPU Core (cpu6502.rs)
+   ---------------------------------------------------------------------------
+   STATUS: DEPRECATED (in migration)
+   This monolithic implementation is being refactored into the modular
+   hierarchy under `src/cpu/`:
+       cpu/
+         mod.rs            - public façade (re-exports Cpu6502)
+         state.rs          - CPU registers & flag helpers
+         addressing.rs     - addressing mode / operand resolution
+         execute.rs        - instruction semantics (ALU, stack, RMW)
+         (future) dispatch_legacy.rs / table.rs / dispatch.rs
+   MIGRATION PLAN:
+   - New code should live in the `cpu` module; do NOT add new functionality
+     here unless strictly necessary to keep existing behavior during the
+     transition.
+   - Incrementally port opcode families to the table-driven dispatcher
+     (feature flag: `table_dispatch`) until full parity is achieved, then
+     remove this file.
+   - Tests referencing crate::cpu6502::Cpu6502 should be updated to use
+     crate::cpu::Cpu6502 (the façade) to avoid depending on this legacy path.
+   WARNING:
+   - This file will be removed once all documented opcodes plus timing,
+     interrupts, and page-cross penalties are validated in the modular core.
+   - Keep changes here minimal (bug fixes only) to reduce merge churn.
+--------------------------------------------------------------------------- */
 pub struct Cpu6502 {
     // Registers
     pub a: u8,      // Accumulator
@@ -44,6 +75,251 @@ const BREAK: u8 = 0b0001_0000; // B (special on push)
 const UNUSED: u8 = 0b0010_0000; // U (always set)
 const OVERFLOW: u8 = 0b0100_0000; // V
 const NEGATIVE: u8 = 0b1000_0000; // N
+
+// ================= Table-Dispatch (feature-gated) =================
+//
+// The following types and static table are defined at module scope so that
+// they are not nested inside the Cpu6502 impl (which caused earlier
+// compilation errors). The Cpu6502::step method can optionally use these
+// when the "table_dispatch" Cargo feature is enabled. Incomplete entries
+// fall back to the legacy match-based dispatcher.
+//
+// Migration plan:
+// 1. Gradually populate EXEC_TABLE with opcode metadata.
+// 2. Add executor coverage for each ExecKind.
+// 3. Remove legacy match once parity is achieved.
+//
+
+#[cfg(feature = "table_dispatch")]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum AddrMode {
+    Implied,
+    Acc,
+    Imm,
+    Zp,
+    ZpX,
+    ZpY,
+    Abs,
+    AbsX,
+    AbsY,
+    Ind,
+    IndX,
+    IndY,
+    Rel,
+}
+
+#[cfg(feature = "table_dispatch")]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum ExecKind {
+    Lda,
+    Ldx,
+    Ldy,
+    Sta,
+    Stx,
+    Sty,
+    And,
+    Ora,
+    Eor,
+    Bit,
+    Adc,
+    Sbc,
+    Inx,
+    Iny,
+    Dex,
+    Dey,
+    Tax,
+    Tay,
+    Txa,
+    Tya,
+    Tsx,
+    Txs,
+    Asl,
+    Lsr,
+    Rol,
+    Ror,
+    Inc,
+    Dec,
+    CmpA,
+    CmpX,
+    CmpY,
+    Clc,
+    Sec,
+    Cli,
+    Sei,
+    Cld,
+    Sed,
+    Clv,
+    Branch,
+    JmpAbs,
+    JmpInd,
+    Jsr,
+    Rts,
+    Brk,
+    Rti,
+    Nop,
+    Fallback,
+}
+
+#[cfg(feature = "table_dispatch")]
+#[derive(Copy, Clone, Debug)]
+struct OpInfo {
+    mode: AddrMode,
+    kind: ExecKind,
+    base: u8,
+    page_cross_penalty: bool,
+    rmw: bool,
+    branch: bool,
+}
+
+#[cfg(feature = "table_dispatch")]
+impl OpInfo {
+    const fn new(
+        mode: AddrMode,
+        kind: ExecKind,
+        base: u8,
+        page_cross_penalty: bool,
+        rmw: bool,
+        branch: bool,
+    ) -> Self {
+        Self {
+            mode,
+            kind,
+            base,
+            page_cross_penalty,
+            rmw,
+            branch,
+        }
+    }
+    const fn fb() -> Self {
+        Self::new(
+            AddrMode::Implied,
+            ExecKind::Fallback,
+            2,
+            false,
+            false,
+            false,
+        )
+    }
+}
+
+#[cfg(feature = "table_dispatch")]
+static EXEC_TABLE: [OpInfo; 256] = {
+    use AddrMode::*;
+    use ExecKind::*;
+    let mut t: [OpInfo; 256] = [OpInfo::fb(); 256];
+
+    // LDA set
+    t[0xA9] = OpInfo::new(Imm, Lda, 2, false, false, false);
+    t[0xA5] = OpInfo::new(Zp, Lda, 3, false, false, false);
+    t[0xB5] = OpInfo::new(ZpX, Lda, 4, false, false, false);
+    t[0xAD] = OpInfo::new(Abs, Lda, 4, false, false, false);
+    t[0xBD] = OpInfo::new(AbsX, Lda, 4, true, false, false);
+    t[0xB9] = OpInfo::new(AbsY, Lda, 4, true, false, false);
+    t[0xA1] = OpInfo::new(IndX, Lda, 6, false, false, false);
+    t[0xB1] = OpInfo::new(IndY, Lda, 5, true, false, false);
+
+    // Flag ops (examples)
+    t[0x18] = OpInfo::new(Implied, Clc, 2, false, false, false);
+    t[0x38] = OpInfo::new(Implied, Sec, 2, false, false, false);
+    t[0xEA] = OpInfo::new(Implied, Nop, 2, false, false, false);
+
+    t
+};
+
+#[inline]
+fn table_dispatch_enabled() -> bool {
+    #[cfg(feature = "table_dispatch")]
+    {
+        true
+    }
+    #[cfg(not(feature = "table_dispatch"))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "table_dispatch")]
+enum Operand {
+    None,
+    Immediate(u8),
+    Address(u16, bool), // (address, page_crossed)
+}
+
+#[cfg(feature = "table_dispatch")]
+impl Cpu6502 {
+    fn resolve_operand(&mut self, bus: &mut Bus, mode: AddrMode) -> Operand {
+        use AddrMode::*;
+        match mode {
+            Implied | Acc => Operand::None,
+            Imm => Operand::Immediate(self.fetch_byte(bus)),
+            Zp => Operand::Address(self.fetch_byte(bus) as u16, false),
+            ZpX => Operand::Address(self.fetch_byte(bus).wrapping_add(self.x) as u16, false),
+            ZpY => Operand::Address(self.fetch_byte(bus).wrapping_add(self.y) as u16, false),
+            Abs => Operand::Address(self.fetch_word(bus), false),
+            AbsX => {
+                let base = self.fetch_word(bus);
+                let eff = base.wrapping_add(self.x as u16);
+                Operand::Address(eff, (base & 0xFF00) != (eff & 0xFF00))
+            }
+            AbsY => {
+                let base = self.fetch_word(bus);
+                let eff = base.wrapping_add(self.y as u16);
+                Operand::Address(eff, (base & 0xFF00) != (eff & 0xFF00))
+            }
+            IndX => {
+                let zp = self.fetch_byte(bus).wrapping_add(self.x);
+                let lo = bus.read(zp as u16) as u16;
+                let hi = bus.read(((zp as u16 + 1) & 0x00FF) as u16) as u16;
+                Operand::Address((hi << 8) | lo, false)
+            }
+            IndY => {
+                let zp = self.fetch_byte(bus);
+                let lo = bus.read(zp as u16) as u16;
+                let hi = bus.read(((zp as u16 + 1) & 0x00FF) as u16) as u16;
+                let base = (hi << 8) | lo;
+                let eff = base.wrapping_add(self.y as u16);
+                Operand::Address(eff, (base & 0xFF00) != (eff & 0xFF00))
+            }
+            Ind => Operand::None, // (Indirect JMP not yet table-migrated)
+            Rel => Operand::None, // (Branches handled later)
+        }
+    }
+    // Execute via table; returns (cycles, consumed_flag)
+    fn exec_via_table(&mut self, bus: &mut Bus, opcode: u8) -> (u32, bool) {
+        use ExecKind::*;
+        let entry = &EXEC_TABLE[opcode as usize];
+        if let ExecKind::Fallback = entry.kind {
+            return (0, false);
+        }
+        let mut cycles = entry.base as u32;
+        let operand = self.resolve_operand(bus, entry.mode);
+        // Page-cross penalty (centralized)
+        if entry.page_cross_penalty {
+            if let Operand::Address(_, crossed) = operand {
+                if crossed {
+                    cycles += 1;
+                }
+            }
+        }
+        match entry.kind {
+            Lda => match operand {
+                Operand::Immediate(v) => self.lda(v),
+                Operand::Address(addr, _) => self.lda(bus.read(addr)),
+                Operand::None => return (0, false),
+            },
+            Clc => self.set_flag(CARRY, false),
+            Sec => self.set_flag(CARRY, true),
+            Nop => {}
+            _ => {
+                // Not yet migrated
+                return (0, false);
+            }
+        }
+        // RMW not applicable for migrated subset yet.
+        bus.tick(cycles);
+        (cycles, true)
+    }
+}
 
 impl Cpu6502 {
     pub fn new() -> Self {
@@ -114,6 +390,17 @@ impl Cpu6502 {
         let opcode = bus.read(self.pc);
         self.pc = self.pc.wrapping_add(1);
         let mut cycles: u32 = Self::base_cycles(opcode);
+
+        // If feature table_dispatch is active, attempt table path first.
+        if table_dispatch_enabled() {
+            #[cfg(feature = "table_dispatch")]
+            {
+                let (table_cycles, consumed) = self.exec_via_table(bus, opcode);
+                if consumed {
+                    return table_cycles;
+                }
+            }
+        }
 
         match opcode {
             // --------- Load/Store ---------
@@ -930,6 +1217,10 @@ impl Cpu6502 {
             _ => 2,
         }
     }
+
+    // (table-dispatch definitions moved to module scope above)
+
+    // (legacy exec_via_table implementation removed from impl; now provided at module scope via specialized impl when feature enabled)
 
     // ------------------------
     // Public helper API

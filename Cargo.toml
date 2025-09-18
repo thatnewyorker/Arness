@@ -11,6 +11,9 @@ default = []
 display = ["dep:pixels", "dep:winit"]
 # Enable screenshot helpers using the image crate
 screenshot = ["dep:image"]
+# Experimental feature: use a table-driven opcode dispatcher in the CPU.
+# When enabled, cpu6502 will use a feature-gated alternate dispatch path.
+table_dispatch = []
 
 [dependencies]
 pixels = { version = "0.15.0", optional = true }
