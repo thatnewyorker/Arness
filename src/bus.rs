@@ -28,6 +28,28 @@ use crate::controller::Controller;
 use crate::mapper::MapperMirroring;
 use crate::ppu::Ppu;
 
+// DMA glue trait impls moved to module scope
+impl crate::bus::dma::CpuMemory for Bus {
+    #[inline]
+    fn cpu_read(&mut self, addr: u16) -> u8 {
+        self.read(addr)
+    }
+}
+
+impl Ppu {
+    #[inline]
+    fn write_oam_via_dma(&mut self, value: u8) {
+        self.write_reg(0x2004, value);
+    }
+}
+
+impl crate::bus::dma::OamWriter for Ppu {
+    #[inline]
+    fn write_oam_data(&mut self, value: u8) {
+        self.write_oam_via_dma(value);
+    }
+}
+
 pub struct Bus {
     // 2KB CPU RAM
     ram: [u8; 0x0800],
@@ -45,16 +67,10 @@ pub struct Bus {
     pub ppu_cycle: u64,
 
     // PPU memory and register shadows for Bus-side PPUDATA path
-    nt_ram: [u8; 0x0800],  // 2 KiB nametable RAM
-    palette_ram: [u8; 32], // 32-byte palette RAM
+    ppu_mem: crate::bus::ppu_space::PpuAddressSpace,
 
-    // DMA state (cycle-accurate OAM DMA)
-    dma_active: bool,
-    dma_src_addr: u16,
-    dma_index: u16,
-    dma_phase: u8, // 1 = read, 2 = write
-    dma_latch: u8,
-    dma_align_cycles: u8, // initial 1 or 2 cycle alignment (513 or 514 total)
+    // DMA controller (cycle-accurate OAM DMA)
+    dma: crate::bus::dma::DmaController,
 
     // Interrupt lines
     pub nmi_pending: bool,
@@ -73,16 +89,10 @@ impl Bus {
             cpu_cycle: 0,
             ppu_cycle: 0,
 
-            // PPU memory and register shadows initialized
-            nt_ram: [0; 0x0800],
-            palette_ram: [0; 32],
+            // PPU address space
+            ppu_mem: crate::bus::ppu_space::PpuAddressSpace::new(),
 
-            dma_active: false,
-            dma_src_addr: 0,
-            dma_index: 0,
-            dma_phase: 1,
-            dma_latch: 0,
-            dma_align_cycles: 0,
+            dma: crate::bus::dma::DmaController::new(),
 
             nmi_pending: false,
             irq_line: false,
@@ -94,9 +104,9 @@ impl Bus {
         self.ppu.reset();
         self.apu.reset();
 
-        // Clear PPU Bus-side memory and shadows
-        self.nt_ram.fill(0);
-        self.palette_ram.fill(0);
+        // Clear PPU address space RAM
+        self.ppu_mem.nt_ram.fill(0);
+        self.ppu_mem.palette_ram.fill(0);
 
         // Controllers: keep state, clear latches/indices
         self.controllers = [Controller::new(), Controller::new()];
@@ -112,140 +122,13 @@ impl Bus {
     // -----------------------------
 
     pub fn read(&mut self, addr: u16) -> u8 {
-        match addr {
-            0x0000..=0x1FFF => {
-                let idx = (addr & 0x07FF) as usize;
-                self.ram[idx]
-            }
-            0x2000..=0x3FFF => {
-                let reg = 0x2000 | (addr & 0x0007);
-                match reg {
-                    0x2002 => {
-                        // PPUSTATUS: PPU handles vblank clear and write toggle reset
-                        self.ppu.read_reg(reg)
-                    }
-                    0x2007 => {
-                        // PPUDATA: Bus-side memory read using PPU latches for buffering and increment
-                        let addr = self.ppu.get_vram_addr() & 0x3FFF;
-                        let value = self.ppu_mem_read(addr);
-                        let ret = if addr < 0x3F00 {
-                            let out = self.ppu.get_vram_buffer();
-                            self.ppu.set_vram_buffer(value);
-                            out
-                        } else {
-                            value
-                        };
-                        let inc = self.ppu.vram_increment_step();
-                        self.ppu.set_vram_addr(addr.wrapping_add(inc) & 0x3FFF);
-                        ret
-                    }
-                    _ => self.ppu.read_reg(reg),
-                }
-            }
-            0x4000..=0x4013 => self.apu.read_reg(addr),
-            0x4014 => {
-                // OAM DMA register read is not meaningful; return 0
-                0
-            }
-            0x4015 => self.apu.read_status(),
-            0x4016 => self.controllers[0].read(),
-            0x4017 => {
-                // Controller 2 serial read on read; writes go to APU frame counter.
-                self.controllers[1].read()
-            }
-            0x4018..=0x401F => {
-                // Typically disabled test registers; return 0
-                0
-            }
-            0x4020..=0x5FFF => {
-                // Expansion area (unused here)
-                0
-            }
-            0x6000..=0x7FFF => {
-                if let Some(cart) = &self.cartridge {
-                    cart.mapper.borrow_mut().cpu_read(addr)
-                } else {
-                    0
-                }
-            }
-            0x8000..=0xFFFF => {
-                if let Some(cart) = &self.cartridge {
-                    cart.mapper.borrow_mut().cpu_read(addr)
-                } else {
-                    0xFF
-                }
-            }
-        }
+        crate::bus::cpu_interface::cpu_read(self, addr)
     }
 
     pub fn write(&mut self, addr: u16, value: u8) {
-        match addr {
-            0x0000..=0x1FFF => {
-                let idx = (addr & 0x07FF) as usize;
-                self.ram[idx] = value;
-            }
-            0x2000..=0x3FFF => {
-                let reg = 0x2000 | (addr & 0x0007);
-                match reg {
-                    0x2000 => {
-                        // PPUCTRL: forward to PPU; PPU owns ctrl state
-                        self.ppu.write_reg(reg, value);
-                    }
-                    0x2005 => {
-                        // PPUSCROLL: PPU manages write toggle internally
-                        self.ppu.write_reg(reg, value);
-                    }
-                    0x2006 => {
-                        // PPUADDR: PPU manages VRAM address and write toggle
-                        self.ppu.write_reg(reg, value);
-                    }
-                    0x2007 => {
-                        // PPUDATA: write via Bus mapping, then increment VRAM address via PPU
-                        let addr = self.ppu.get_vram_addr() & 0x3FFF;
-                        self.ppu_mem_write(addr, value);
-                        let inc = self.ppu.vram_increment_step();
-                        self.ppu.set_vram_addr(addr.wrapping_add(inc) & 0x3FFF);
-                    }
-                    _ => {
-                        self.ppu.write_reg(reg, value);
-                    }
-                }
-            }
-            0x4000..=0x4013 => self.apu.write_reg(addr, value),
-            0x4014 => {
-                // OAM DMA: schedule a cycle-accurate transfer (CPU stalled; PPU/APU continue)
-                self.dma_active = true;
-                self.dma_src_addr = (value as u16) << 8;
-                self.dma_index = 0;
-                self.dma_phase = 1; // start with read phase after alignment
-                self.dma_latch = 0;
-                // 513 cycles if current CPU cycle is even, 514 if odd
-                self.dma_align_cycles = 1 + ((self.cpu_cycle & 1) as u8);
-            }
-            0x4015 => self.apu.write_reg(addr, value),
-            0x4016 => {
-                // Controller strobe for both controllers (bit 0 relevant)
-                self.controllers[0].write_strobe(value);
-                self.controllers[1].write_strobe(value);
-            }
-            0x4017 => self.apu.write_reg(addr, value),
-            0x4018..=0x401F => {
-                // Typically disabled test registers; ignore writes
-            }
-            0x4020..=0x5FFF => {
-                // Expansion area: ignore
-            }
-            0x6000..=0x7FFF => {
-                if let Some(cart) = &self.cartridge {
-                    cart.mapper.borrow_mut().cpu_write(addr, value);
-                }
-            }
-            0x8000..=0xFFFF => {
-                if let Some(cart) = &self.cartridge {
-                    cart.mapper.borrow_mut().cpu_write(addr, value);
-                }
-            }
-        }
+        crate::bus::cpu_interface::cpu_write(self, addr, value, |bus, page| {
+            bus.dma.start(page, bus.cpu_cycle);
+        });
     }
 
     // -----------------------------
@@ -262,15 +145,47 @@ impl Bus {
                     0
                 }
             }
-            0x2000..=0x3EFF => {
-                // Nametable region with mirroring; $3000-$3EFF mirrors $2000-$2EFF
-                let base = 0x2000 | (a & 0x0FFF);
-                let idx = self.map_nametable_addr(base);
-                self.nt_ram[idx]
-            }
-            0x3F00..=0x3FFF => {
-                let idx = self.map_palette_addr(a);
-                self.palette_ram[idx]
+            0x2000..=0x3FFF => {
+                // Resolve header mirroring
+                let header_mode = if let Some(cart) = &self.cartridge {
+                    match cart.mirroring() {
+                        crate::cartridge::Mirroring::Horizontal => {
+                            crate::bus::ppu_space::HeaderMirroring::Horizontal
+                        }
+                        crate::cartridge::Mirroring::Vertical => {
+                            crate::bus::ppu_space::HeaderMirroring::Vertical
+                        }
+                        crate::cartridge::Mirroring::FourScreen => {
+                            crate::bus::ppu_space::HeaderMirroring::FourScreen
+                        }
+                    }
+                } else {
+                    crate::bus::ppu_space::HeaderMirroring::Horizontal
+                };
+                // Resolve dynamic (mapper) mirroring unless header enforces FourScreen
+                let dyn_mode = if let Some(cart) = &self.cartridge {
+                    if !matches!(cart.mirroring(), crate::cartridge::Mirroring::FourScreen) {
+                        cart.mapper.borrow().current_mirroring().map(|m| match m {
+                            MapperMirroring::SingleScreenLower => {
+                                crate::bus::ppu_space::DynMirroring::SingleScreenLower
+                            }
+                            MapperMirroring::SingleScreenUpper => {
+                                crate::bus::ppu_space::DynMirroring::SingleScreenUpper
+                            }
+                            MapperMirroring::Vertical => {
+                                crate::bus::ppu_space::DynMirroring::Vertical
+                            }
+                            MapperMirroring::Horizontal => {
+                                crate::bus::ppu_space::DynMirroring::Horizontal
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.ppu_mem.ppu_read(a, header_mode, dyn_mode)
             }
             _ => 0,
         }
@@ -284,77 +199,53 @@ impl Bus {
                     cart.mapper.borrow_mut().ppu_write(a, value);
                 }
             }
-            0x2000..=0x3EFF => {
-                let base = 0x2000 | (a & 0x0FFF);
-                let idx = self.map_nametable_addr(base);
-                self.nt_ram[idx] = value;
-            }
-            0x3F00..=0x3FFF => {
-                let idx = self.map_palette_addr(a);
-                self.palette_ram[idx] = value;
+            0x2000..=0x3FFF => {
+                // Resolve header mirroring
+                let header_mode = if let Some(cart) = &self.cartridge {
+                    match cart.mirroring() {
+                        crate::cartridge::Mirroring::Horizontal => {
+                            crate::bus::ppu_space::HeaderMirroring::Horizontal
+                        }
+                        crate::cartridge::Mirroring::Vertical => {
+                            crate::bus::ppu_space::HeaderMirroring::Vertical
+                        }
+                        crate::cartridge::Mirroring::FourScreen => {
+                            crate::bus::ppu_space::HeaderMirroring::FourScreen
+                        }
+                    }
+                } else {
+                    crate::bus::ppu_space::HeaderMirroring::Horizontal
+                };
+                // Resolve dynamic (mapper) mirroring unless header enforces FourScreen
+                let dyn_mode = if let Some(cart) = &self.cartridge {
+                    if !matches!(cart.mirroring(), crate::cartridge::Mirroring::FourScreen) {
+                        cart.mapper.borrow().current_mirroring().map(|m| match m {
+                            MapperMirroring::SingleScreenLower => {
+                                crate::bus::ppu_space::DynMirroring::SingleScreenLower
+                            }
+                            MapperMirroring::SingleScreenUpper => {
+                                crate::bus::ppu_space::DynMirroring::SingleScreenUpper
+                            }
+                            MapperMirroring::Vertical => {
+                                crate::bus::ppu_space::DynMirroring::Vertical
+                            }
+                            MapperMirroring::Horizontal => {
+                                crate::bus::ppu_space::DynMirroring::Horizontal
+                            }
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.ppu_mem.ppu_write(a, value, header_mode, dyn_mode);
             }
             _ => {}
         }
     }
 
-    fn map_nametable_addr(&self, addr: u16) -> usize {
-        // Reduce to $2000-$2FFF
-        let a = (addr - 0x2000) & 0x0FFF;
-        let table = (a / 0x400) as u16; // 0..3
-        let offset = (a % 0x400) as usize;
-
-        // Determine header mirroring and (if allowed) dynamic mapper mirroring override.
-        let (header_mirr, dyn_mirr) = if let Some(cart) = &self.cartridge {
-            let header = cart.mirroring();
-            // Do not allow mapper override for four-screen (header enforced).
-            let dynamic = if !matches!(header, crate::cartridge::Mirroring::FourScreen) {
-                cart.mapper.borrow().current_mirroring()
-            } else {
-                None
-            };
-            (header, dynamic)
-        } else {
-            (crate::cartridge::Mirroring::Horizontal, None)
-        };
-
-        let bank = if let Some(mode) = dyn_mirr {
-            match mode {
-                MapperMirroring::SingleScreenLower => 0,
-                MapperMirroring::SingleScreenUpper => 1,
-                MapperMirroring::Vertical => {
-                    // 0,2 -> bank 0; 1,3 -> bank 1
-                    if (table & 1) == 0 { 0 } else { 1 }
-                }
-                MapperMirroring::Horizontal => {
-                    // 0,1 -> bank 0; 2,3 -> bank 1
-                    if table < 2 { 0 } else { 1 }
-                }
-            }
-        } else {
-            match header_mirr {
-                crate::cartridge::Mirroring::Horizontal => {
-                    if table < 2 {
-                        0
-                    } else {
-                        1
-                    }
-                }
-                crate::cartridge::Mirroring::Vertical => {
-                    if (table & 1) == 0 {
-                        0
-                    } else {
-                        1
-                    }
-                }
-                crate::cartridge::Mirroring::FourScreen => {
-                    // Four-screen not fully modeled; approximate as vertical mirroring
-                    if (table & 1) == 0 { 0 } else { 1 }
-                }
-            }
-        };
-
-        (bank as usize) * 0x400 + offset
-    }
+    // removed: map_nametable_addr moved to bus/ppu_space.rs
 
     /// Public wrapper for reading from PPU address space (0x0000-0x3FFF) using the
     /// same mirroring and mapper logic as CPU-driven PPUDATA accesses. Intended
@@ -370,15 +261,7 @@ impl Bus {
         self.ppu_mem_write(addr, value);
     }
 
-    fn map_palette_addr(&self, addr: u16) -> usize {
-        // Mirror to 0x3F00-0x3F1F
-        let mut idx = (addr - 0x3F00) as usize & 0x1F;
-        // $3F10/$3F14/$3F18/$3F1C mirror $3F00/$3F04/$3F08/$3F0C
-        if idx >= 16 && (idx & 0x03) == 0 {
-            idx -= 16;
-        }
-        idx
-    }
+    // removed: map_palette_addr moved to bus/ppu_space.rs
 
     // Convenience for little-endian word reads via Bus (used by CPU vectors).
     #[inline]
@@ -391,28 +274,12 @@ impl Bus {
     // DMA state accessors for external users (CPU)
     #[inline]
     pub fn dma_is_active(&self) -> bool {
-        self.dma_active
+        self.dma.is_active()
     }
 
     #[inline]
     pub fn dma_stall_remaining(&self) -> u32 {
-        if !self.dma_active {
-            return 0;
-        }
-        let align = self.dma_align_cycles as u32;
-        let bytes_left = 256u32.saturating_sub(self.dma_index as u32);
-        // If we're in read phase, each remaining byte costs 2 cycles.
-        // If in write phase, 1 cycle to write current latched byte, then 2 cycles per remaining-1 bytes.
-        let transfer_cycles = if self.dma_phase == 1 {
-            bytes_left.saturating_mul(2)
-        } else {
-            if bytes_left == 0 {
-                0
-            } else {
-                1 + (bytes_left - 1) * 2
-            }
-        };
-        align + transfer_cycles
+        self.dma.stall_remaining()
     }
 
     /// Advance bus time by the specified number of CPU cycles.
@@ -420,63 +287,35 @@ impl Bus {
     /// - Consumes DMA stall cycles when active.
     /// - Polls PPU NMI latch after each CPU cycle and sets nmi_pending if requested.
     pub fn tick(&mut self, cycles: u32) {
-        for _ in 0..cycles {
-            // Advance CPU counter
-            self.cpu_cycle = self.cpu_cycle.wrapping_add(1);
-
-            // Step PPU three times per CPU cycle (move PPU out to avoid mutable + immutable borrow conflict)
-            {
-                let mut ppu = std::mem::replace(&mut self.ppu, Ppu::new());
-                for _ in 0..3 {
-                    ppu.tick(&*self);
-                    self.ppu_cycle = self.ppu_cycle.wrapping_add(1);
-                }
-                self.ppu = ppu;
-            }
-
-            // Execute one DMA micro-step per CPU cycle if active
-            if self.dma_active {
-                if self.dma_align_cycles > 0 {
-                    // Alignment/dummy cycles before first read
-                    self.dma_align_cycles = self.dma_align_cycles.saturating_sub(1);
-                } else if self.dma_phase == 1 {
-                    // Read phase: fetch from CPU memory
-                    let addr = self.dma_src_addr.wrapping_add(self.dma_index);
-                    self.dma_latch = self.read(addr);
-                    self.dma_phase = 2;
-                } else {
-                    // Write phase: write to PPU OAM via OAMDATA (increments OAMADDR)
-                    self.ppu.write_reg(0x2004, self.dma_latch);
-                    self.dma_index = self.dma_index.wrapping_add(1);
-                    if self.dma_index >= 256 {
-                        self.dma_active = false;
-                        self.dma_phase = 1;
-                    } else {
-                        self.dma_phase = 1;
-                    }
-                }
-            }
-
-            // Latch NMI request from PPU (if any)
-            if self.ppu.take_nmi_request() {
-                self.nmi_pending = true;
-            }
-
-            // Step APU once per CPU cycle and aggregate IRQ (APU OR mapper)
-            self.apu.tick(1);
-            let mapper_irq = if let Some(cart) = &self.cartridge {
-                cart.mapper.borrow().irq_pending()
-            } else {
-                false
-            };
-            self.irq_line = self.apu.irq_asserted() || mapper_irq;
-        }
+        crate::bus::clock::tick(self, cycles, |bus| {
+            // Perform exactly one DMA micro-step (alignment/read/write) using the controller.
+            let mut ppu = std::mem::replace(&mut bus.ppu, Ppu::new());
+            let mut dma = std::mem::replace(&mut bus.dma, crate::bus::dma::DmaController::new());
+            dma.step_one_cycle(bus, &mut ppu);
+            bus.ppu = ppu;
+            bus.dma = dma;
+        });
     }
 
     /// Return the total number of CPU cycles elapsed (external accessor for tests).
     pub fn total_ticks(&self) -> u64 {
         self.cpu_cycle as u64
     }
+
+    // Direct CPU RAM mirrored accessors (hot path)
+    #[inline]
+    pub fn ram_read_mirrored(&self, addr: u16) -> u8 {
+        let idx = (addr & 0x07FF) as usize;
+        self.ram[idx]
+    }
+
+    #[inline]
+    pub fn ram_write_mirrored(&mut self, addr: u16, value: u8) {
+        let idx = (addr & 0x07FF) as usize;
+        self.ram[idx] = value;
+    }
+
+    // Minimal DMA glue implementations moved to module scope
 
     // -----------------------------
     // Integration helpers

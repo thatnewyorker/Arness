@@ -18,6 +18,7 @@ In tests, shared iNES builders are available under `crate::test_utils`.
 
 // Core emulator modules
 pub mod apu;
+#[path = "bus/mod.rs"]
 pub mod bus;
 pub mod cartridge;
 pub mod controller;

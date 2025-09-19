@@ -168,6 +168,16 @@ pub struct Ppu {
 
     // Master enable for the cycle-accurate sprite pipeline (allows fallback to legacy path if false).
     sprite_pipeline_enabled: bool,
+
+    // Overflow detection and evaluation write-pointer state
+    oam_secondary_write_index: u8,
+    oam_eval_overflow_detected: bool,
+    oam_eval_overflow_scanline: i16,
+    oam_eval_overflow_dot: u16,
+
+    // Debug: record sprite-zero hit (scanline, dot) when set
+    sprite_zero_hit_scanline: i16,
+    sprite_zero_hit_dot: u16,
 }
 
 impl Default for Ppu {
@@ -217,6 +227,12 @@ impl Ppu {
             oam_eval_sprite_count: 0,
             sprite_fetch_slot: 0,
             sprite_pipeline_enabled: false,
+            oam_secondary_write_index: 0,
+            oam_eval_overflow_detected: false,
+            oam_eval_overflow_scanline: 0,
+            oam_eval_overflow_dot: 0,
+            sprite_zero_hit_scanline: 0,
+            sprite_zero_hit_dot: 0,
         }
     }
 
@@ -258,6 +274,14 @@ impl Ppu {
         self.sprite_fetch_slot = 0;
         // Keep disabled until full per-dot implementation replaces legacy sprite overlay
         self.sprite_pipeline_enabled = false;
+
+        // Overflow detection and evaluation write-pointer state
+        self.oam_secondary_write_index = 0;
+        self.oam_eval_overflow_detected = false;
+        self.oam_eval_overflow_scanline = 0;
+        self.oam_eval_overflow_dot = 0;
+        self.sprite_zero_hit_scanline = 0;
+        self.sprite_zero_hit_dot = 0;
     }
 
     /// Read-only framebuffer slice (RGBA).
@@ -528,11 +552,8 @@ impl Ppu {
                     self.oam_eval_sprite_count = 0;
                 }
             } else if self.dot >= 65 && self.dot <= 256 {
-                // PRIMARY OAM EVALUATION: scan primary OAM and copy up to 8 in-range sprites (for next scanline) into secondary OAM.
-                // One OAM byte processed per dot. Simplified (Phase B) model:
-                // - Determine if sprite is in range using its Y (byte 0) against (scanline + 1).
-                // - If in range and we have <8 sprites already, copy each of its 4 bytes into the next secondary OAM slot.
-                // - Increment sprite count only after byte 3 (full sprite copied), preserving contiguous 4-byte layout.
+                // PRIMARY OAM EVALUATION: internal write-pointer model; detect overflow at ninth in-range sprite (Y byte).
+                // One OAM byte is processed per dot. We continue scanning all 64 sprites even after 8 are selected.
                 if self.oam_eval_oam_index < 64 {
                     let sprite_index = self.oam_eval_oam_index as usize;
                     let byte_index = self.oam_eval_byte_index as usize;
@@ -540,29 +561,51 @@ impl Ppu {
                     let y_byte = self.oam[base];
                     let next_scanline = self.scanline + 1;
                     let sprite_height = if (self.ctrl & 0x20) != 0 { 16 } else { 8 };
-                    // Y comparison semantics: using raw OAM Y as top line (Phase A parity).
+                    // Use raw OAM Y semantics consistent with Phase A tests.
                     let in_range = next_scanline >= y_byte as i16
                         && next_scanline < y_byte as i16 + sprite_height as i16;
+
+                    // Overflow detection: when we encounter the ninth in-range sprite on its Y byte, set overflow immediately.
+                    if in_range
+                        && self.oam_eval_sprite_count >= 8
+                        && self.oam_eval_byte_index == 0
+                        && !self.oam_eval_overflow_detected
+                    {
+                        self.set_sprite_overflow(true);
+                        self.oam_eval_overflow_detected = true;
+                        self.oam_eval_overflow_scanline = self.scanline;
+                        self.oam_eval_overflow_dot = self.dot;
+                    }
+
+                    // Copy current sprite into secondary OAM only if in-range and we still have room (<8).
                     let copying = in_range && self.oam_eval_sprite_count < 8;
                     let value = self.oam[base + byte_index];
                     if copying {
+                        // Initialize internal write pointer at start of a new sprite copy.
+                        if self.oam_eval_byte_index == 0 {
+                            self.oam_secondary_write_index =
+                                self.oam_eval_sprite_count.saturating_mul(4);
+                        }
                         let slot = self.oam_eval_sprite_count as usize;
-                        // Track original OAM index used for this selected slot (for priority and sprite-zero hit).
+                        // Track original OAM index for priority and sprite-zero hit.
                         self.sprite_slot_orig_index[slot] = self.oam_eval_oam_index;
                         self.sprite_slot_is_zero[slot] = self.oam_eval_oam_index == 0;
-                        let dest = slot * 4 + byte_index;
+
+                        let dest = self.oam_secondary_write_index as usize + byte_index;
                         if dest < self.secondary_oam.len() {
                             self.secondary_oam[dest] = value;
                         }
                     }
-                    // Advance byte index; when finishing byte 3, advance to next sprite and (if copying) bump count.
+
+                    // Advance to next byte; after byte 3, finish copy (if any) and move to next sprite.
                     self.oam_eval_byte_index = self.oam_eval_byte_index.wrapping_add(1);
                     if self.oam_eval_byte_index >= 4 {
                         self.oam_eval_byte_index = 0;
                         if copying {
-                            // Mark sprite accepted (increment count after full 4 bytes copied)
                             self.oam_eval_sprite_count =
                                 self.oam_eval_sprite_count.saturating_add(1);
+                            self.oam_secondary_write_index =
+                                self.oam_secondary_write_index.wrapping_add(4);
                         }
                         self.oam_eval_oam_index = self.oam_eval_oam_index.wrapping_add(1);
                     }
@@ -814,8 +857,17 @@ impl Ppu {
 
                 // Sprite-zero hit: when sprite 0 overlaps non-zero background
                 if self.sprite_slot_is_zero[s] && bg_is_opaque {
-                    // Gating refinements (left-8 masking, timing) to be added in Phase C
-                    self.set_sprite_zero_hit(true);
+                    // Accurate sprite-zero gating: require BG+SPR enabled and respect left-8 masking
+                    let bg_enabled = (self.mask & 0x08) != 0;
+                    let spr_enabled = (self.mask & 0x10) != 0;
+                    let show_bg_left = (self.mask & 0x02) != 0;
+                    let show_spr_left = (self.mask & 0x04) != 0;
+                    let in_left8 = x < 8;
+                    if bg_enabled && spr_enabled && (!in_left8 || (show_bg_left && show_spr_left)) {
+                        self.set_sprite_zero_hit(true);
+                        self.sprite_zero_hit_scanline = self.scanline;
+                        self.sprite_zero_hit_dot = self.dot;
+                    }
                 }
             }
         }
