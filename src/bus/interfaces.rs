@@ -16,7 +16,10 @@ Rationale:
   the entire `Bus` while still delegating to the exact same mapping logic.
 */
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
+use crate::bus::ppu_space::{DynMirroring, HeaderMirroring, PpuAddressSpace};
+use crate::cartridge::{Cartridge, Mirroring};
+use crate::mapper::MapperMirroring;
 use crate::ppu_bus::PpuBus;
 
 /// Read-only view of the `Bus` that implements `PpuBus`.
@@ -25,26 +28,68 @@ use crate::ppu_bus::PpuBus;
 /// cartridge/mapper and mirroring behavior, without exposing any mutable API.
 #[derive(Clone, Copy)]
 pub struct BusPpuView<'a> {
-    bus: &'a Bus,
+    ppu_mem: &'a PpuAddressSpace,
+    cartridge: Option<&'a Cartridge>,
 }
 
 impl<'a> BusPpuView<'a> {
-    /// Create a new read-only PPU view over the provided `Bus`.
+    /// Create a new read-only PPU view borrowing only the fields the PPU needs.
     #[inline]
     pub fn new(bus: &'a Bus) -> Self {
-        Self { bus }
+        Self {
+            ppu_mem: bus.ppu_mem(),
+            cartridge: bus.cartridge.as_ref(),
+        }
     }
 
-    /// Access the underlying `Bus` reference if needed for non-PPU read-only queries.
+    /// Alternate constructor from explicit parts (avoids borrowing the full `Bus`).
     #[inline]
-    pub fn bus(&self) -> &'a Bus {
-        self.bus
+    pub fn from_parts(ppu_mem: &'a PpuAddressSpace, cartridge: Option<&'a Cartridge>) -> Self {
+        Self { ppu_mem, cartridge }
     }
 }
 
 impl<'a> PpuBus for BusPpuView<'a> {
     #[inline]
     fn ppu_read(&self, addr: u16) -> u8 {
-        self.bus.ppu_read(addr)
+        let a = addr & 0x3FFF;
+        match a {
+            0x0000..=0x1FFF => {
+                if let Some(cart) = self.cartridge {
+                    cart.mapper.borrow().ppu_read(a)
+                } else {
+                    0
+                }
+            }
+            0x2000..=0x3FFF => {
+                // Resolve header mirroring
+                let header_mode = if let Some(cart) = self.cartridge {
+                    match cart.mirroring() {
+                        Mirroring::Horizontal => HeaderMirroring::Horizontal,
+                        Mirroring::Vertical => HeaderMirroring::Vertical,
+                        Mirroring::FourScreen => HeaderMirroring::FourScreen,
+                    }
+                } else {
+                    HeaderMirroring::Horizontal
+                };
+                // Resolve dynamic (mapper) mirroring unless header enforces FourScreen
+                let dyn_mode = if let Some(cart) = self.cartridge {
+                    if !matches!(cart.mirroring(), Mirroring::FourScreen) {
+                        cart.mapper.borrow().current_mirroring().map(|m| match m {
+                            MapperMirroring::SingleScreenLower => DynMirroring::SingleScreenLower,
+                            MapperMirroring::SingleScreenUpper => DynMirroring::SingleScreenUpper,
+                            MapperMirroring::Vertical => DynMirroring::Vertical,
+                            MapperMirroring::Horizontal => DynMirroring::Horizontal,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                self.ppu_mem.ppu_read(a, header_mode, dyn_mode)
+            }
+            _ => 0,
+        }
     }
 }

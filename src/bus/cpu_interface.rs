@@ -27,8 +27,10 @@ Address map (summary, unchanged):
 - $8000-$FFFF: Cartridge PRG ROM (mapper-controlled)
 */
 
-use crate::bus_impl::Bus;
-use crate::bus_impl::ppu_registers::PpuRegisters;
+use crate::bus::Bus;
+use crate::bus::apu_registers::ApuRegisters;
+use crate::bus::controller_registers::ControllerRegisters;
+use crate::bus::ppu_registers::PpuRegisters;
 
 /// CPU-visible read from the unified address space.
 pub fn cpu_read(bus: &mut Bus, addr: u16) -> u8 {
@@ -43,14 +45,18 @@ pub fn cpu_read(bus: &mut Bus, addr: u16) -> u8 {
             // Delegate to PPU registers handler (handles mirroring, PPUDATA semantics).
             PpuRegisters::read(bus, addr)
         }
-        0x4000..=0x4013 => bus.apu.read_reg(addr),
-        0x4014 => {
-            // OAM DMA register read not meaningful; return 0
-            0
+        0x4000..=0x4017 => {
+            if let Some(v) = ApuRegisters::read(bus, addr) {
+                v
+            } else if addr == 0x4014 {
+                // OAM DMA register read not meaningful; return 0
+                0
+            } else if let Some(v) = ControllerRegisters::read(bus, addr) {
+                v
+            } else {
+                0
+            }
         }
-        0x4015 => bus.apu.read_status(),
-        0x4016 => bus.controllers[0].read(),
-        0x4017 => bus.controllers[1].read(),
         0x4018..=0x401F => 0,
         0x4020..=0x5FFF => 0,
         0x6000..=0x7FFF => {
@@ -88,18 +94,18 @@ where
             // Delegate to PPU registers handler (mirroring handled inside).
             PpuRegisters::write(bus, addr, value);
         }
-        0x4000..=0x4013 => bus.apu.write_reg(addr, value),
-        0x4014 => {
-            // OAM DMA: invoke the provided callback to start DMA with cycle-accurate semantics.
-            dma_start(bus, value);
+        0x4000..=0x4017 => {
+            if ApuRegisters::write(bus, addr, value) {
+                // handled by APU
+            } else if addr == 0x4014 {
+                // OAM DMA: invoke the provided callback to start DMA with cycle-accurate semantics.
+                dma_start(bus, value);
+            } else if ControllerRegisters::write(bus, addr, value) {
+                // handled by controllers
+            } else {
+                // not handled here
+            }
         }
-        0x4015 => bus.apu.write_reg(addr, value),
-        0x4016 => {
-            // Controller strobe for both controllers (bit 0 relevant)
-            bus.controllers[0].write_strobe(value);
-            bus.controllers[1].write_strobe(value);
-        }
-        0x4017 => bus.apu.write_reg(addr, value),
         0x4018..=0x401F => {
             // Typically disabled test registers; ignore writes
         }

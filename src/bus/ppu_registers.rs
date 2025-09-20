@@ -18,7 +18,7 @@ Notes
   - Write: writes via bus PPU mapping and increments VRAM address according to PPUCTRL.
 "#]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 
 /// Handler for CPU-visible PPU register reads/writes.
 pub struct PpuRegisters;

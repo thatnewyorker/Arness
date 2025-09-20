@@ -48,8 +48,13 @@ pub mod nametable_mapper {
     //! - Resolve logical nametable address to physical index based on mirroring mode.
 }
 
-/// Cycle-accurate OAM DMA controller.
+/// APU register window handler (0x4000–0x4017 subset).
+pub mod apu_registers;
+/// Controller ($4016/$4017) handler.
+pub mod controller_registers;
 pub mod dma;
+/// Cycle-accurate OAM DMA controller.
+pub mod ram;
 
 /// Tick/scheduler orchestration for CPU/PPU/APU/DMA and interrupts.
 pub mod clock;
@@ -68,7 +73,9 @@ pub mod integration_helpers {
 
 // Public re-exports for consumers. As functionality migrates into the submodules,
 // these `pub use` lines ensure the public surface remains discoverable from `bus`.
+pub use apu_registers::*;
 pub use clock::*;
+pub use controller_registers::*;
 pub use cpu_interface::*;
 pub use dma::*;
 pub use integration_helpers::*;
@@ -77,3 +84,4 @@ pub use interfaces::*;
 pub use nametable_mapper::*;
 pub use ppu_registers::*;
 pub use ppu_space::*;
+pub use ram::*;
