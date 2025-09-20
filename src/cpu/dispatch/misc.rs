@@ -45,7 +45,7 @@ handle(...) returns:
 
 #![allow(dead_code)]
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::cpu::regs::CpuRegs;
 
 use crate::cpu::execute::{pha, php, pla, plp, set_flag, tax, tay, tsx, txa, txs, tya};
@@ -97,7 +97,7 @@ pub(super) fn handle<C: CpuRegs>(
 
 #[cfg(test)]
 mod tests {
-    use crate::bus::Bus;
+    use crate::bus_impl::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::cpu::cycles::base_cycles;

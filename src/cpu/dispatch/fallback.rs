@@ -31,7 +31,7 @@ Behavior Notes
 This module is intentionally minimal; as table coverage grows, its usage will diminish.
 */
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::cpu::regs::CpuRegs;
 // Shared modular helpers
 use crate::cpu::cycles::base_cycles;

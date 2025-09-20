@@ -57,7 +57,7 @@ Design Notes
 
 #![allow(dead_code)]
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::cpu::regs::CpuRegs;
 use crate::cpu::state::{BREAK, CARRY, NEGATIVE, OVERFLOW, UNUSED, ZERO};
 

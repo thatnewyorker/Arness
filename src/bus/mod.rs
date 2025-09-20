@@ -6,7 +6,7 @@ Overview
   the previous single-file `src/bus.rs` incrementally while preserving behavior.
 
 Modules and responsibilities
-- legacy: includes the legacy single-file Bus implementation; `Bus` is re-exported for compatibility.
+- Bus: public façade implemented directly in this module (migrated from legacy).
 - cpu_interface: CPU-visible address decoder and helpers (read/write, read_word); delegates to devices.
 - ppu_registers: CPU-visible PPU register window (0x2000-0x3FFF, with mirroring and PPUDATA semantics).
 - ppu_space: PPU address-space mapping (nametables, palette, mirroring) via `PpuAddressSpace` and pure helpers.
@@ -26,9 +26,11 @@ Migration notes
 #![allow(unused_macros)]
 #![allow(unused_mut)]
 
-#[path = "../bus.rs"]
-pub mod legacy;
-pub use legacy::Bus;
+// Inlined Bus implementation (migrated from legacy.rs) wrapped into a module to accept inner doc comments
+pub mod bus_impl {
+    include!("bus_impl.rs");
+}
+pub use bus_impl::Bus;
 
 /// CPU-visible memory map and helpers (dispatcher for address ranges).
 pub mod cpu_interface;

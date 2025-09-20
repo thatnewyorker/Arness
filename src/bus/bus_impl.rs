@@ -1,4 +1,4 @@
-/*!
+/**
 Bus abstraction mapping CPU address space to RAM, PPU/APU, controllers, and cartridge.
 
 Address map (CPU):
@@ -21,7 +21,6 @@ Notes:
 - TODO: DMA source reads from I/O ($2000-$401F) can trigger side effects; consider masking to open bus or restricting DMA source to RAM/PRG to avoid surprising behavior.
 - Open bus behavior is not modeled precisely yet; some registers currently return mirrors for development visibility.
 */
-
 use crate::apu::Apu;
 use crate::cartridge::Cartridge;
 use crate::controller::Controller;
@@ -29,7 +28,7 @@ use crate::mapper::MapperMirroring;
 use crate::ppu::Ppu;
 
 // DMA glue trait impls moved to module scope
-impl crate::bus::dma::CpuMemory for Bus {
+impl crate::bus_impl::dma::CpuMemory for Bus {
     #[inline]
     fn cpu_read(&mut self, addr: u16) -> u8 {
         self.read(addr)
@@ -43,7 +42,7 @@ impl Ppu {
     }
 }
 
-impl crate::bus::dma::OamWriter for Ppu {
+impl crate::bus_impl::dma::OamWriter for Ppu {
     #[inline]
     fn write_oam_data(&mut self, value: u8) {
         self.write_oam_via_dma(value);
@@ -67,10 +66,10 @@ pub struct Bus {
     pub ppu_cycle: u64,
 
     // PPU memory and register shadows for Bus-side PPUDATA path
-    ppu_mem: crate::bus::ppu_space::PpuAddressSpace,
+    ppu_mem: crate::bus_impl::ppu_space::PpuAddressSpace,
 
     // DMA controller (cycle-accurate OAM DMA)
-    dma: crate::bus::dma::DmaController,
+    dma: crate::bus_impl::dma::DmaController,
 
     // Interrupt lines
     pub nmi_pending: bool,
@@ -90,9 +89,9 @@ impl Bus {
             ppu_cycle: 0,
 
             // PPU address space
-            ppu_mem: crate::bus::ppu_space::PpuAddressSpace::new(),
+            ppu_mem: crate::bus_impl::ppu_space::PpuAddressSpace::new(),
 
-            dma: crate::bus::dma::DmaController::new(),
+            dma: crate::bus_impl::dma::DmaController::new(),
 
             nmi_pending: false,
             irq_line: false,
@@ -122,11 +121,11 @@ impl Bus {
     // -----------------------------
 
     pub fn read(&mut self, addr: u16) -> u8 {
-        crate::bus::cpu_interface::cpu_read(self, addr)
+        crate::bus_impl::cpu_interface::cpu_read(self, addr)
     }
 
     pub fn write(&mut self, addr: u16, value: u8) {
-        crate::bus::cpu_interface::cpu_write(self, addr, value, |bus, page| {
+        crate::bus_impl::cpu_interface::cpu_write(self, addr, value, |bus, page| {
             bus.dma.start(page, bus.cpu_cycle);
         });
     }
@@ -150,33 +149,33 @@ impl Bus {
                 let header_mode = if let Some(cart) = &self.cartridge {
                     match cart.mirroring() {
                         crate::cartridge::Mirroring::Horizontal => {
-                            crate::bus::ppu_space::HeaderMirroring::Horizontal
+                            crate::bus_impl::ppu_space::HeaderMirroring::Horizontal
                         }
                         crate::cartridge::Mirroring::Vertical => {
-                            crate::bus::ppu_space::HeaderMirroring::Vertical
+                            crate::bus_impl::ppu_space::HeaderMirroring::Vertical
                         }
                         crate::cartridge::Mirroring::FourScreen => {
-                            crate::bus::ppu_space::HeaderMirroring::FourScreen
+                            crate::bus_impl::ppu_space::HeaderMirroring::FourScreen
                         }
                     }
                 } else {
-                    crate::bus::ppu_space::HeaderMirroring::Horizontal
+                    crate::bus_impl::ppu_space::HeaderMirroring::Horizontal
                 };
                 // Resolve dynamic (mapper) mirroring unless header enforces FourScreen
                 let dyn_mode = if let Some(cart) = &self.cartridge {
                     if !matches!(cart.mirroring(), crate::cartridge::Mirroring::FourScreen) {
                         cart.mapper.borrow().current_mirroring().map(|m| match m {
                             MapperMirroring::SingleScreenLower => {
-                                crate::bus::ppu_space::DynMirroring::SingleScreenLower
+                                crate::bus_impl::ppu_space::DynMirroring::SingleScreenLower
                             }
                             MapperMirroring::SingleScreenUpper => {
-                                crate::bus::ppu_space::DynMirroring::SingleScreenUpper
+                                crate::bus_impl::ppu_space::DynMirroring::SingleScreenUpper
                             }
                             MapperMirroring::Vertical => {
-                                crate::bus::ppu_space::DynMirroring::Vertical
+                                crate::bus_impl::ppu_space::DynMirroring::Vertical
                             }
                             MapperMirroring::Horizontal => {
-                                crate::bus::ppu_space::DynMirroring::Horizontal
+                                crate::bus_impl::ppu_space::DynMirroring::Horizontal
                             }
                         })
                     } else {
@@ -204,33 +203,33 @@ impl Bus {
                 let header_mode = if let Some(cart) = &self.cartridge {
                     match cart.mirroring() {
                         crate::cartridge::Mirroring::Horizontal => {
-                            crate::bus::ppu_space::HeaderMirroring::Horizontal
+                            crate::bus_impl::ppu_space::HeaderMirroring::Horizontal
                         }
                         crate::cartridge::Mirroring::Vertical => {
-                            crate::bus::ppu_space::HeaderMirroring::Vertical
+                            crate::bus_impl::ppu_space::HeaderMirroring::Vertical
                         }
                         crate::cartridge::Mirroring::FourScreen => {
-                            crate::bus::ppu_space::HeaderMirroring::FourScreen
+                            crate::bus_impl::ppu_space::HeaderMirroring::FourScreen
                         }
                     }
                 } else {
-                    crate::bus::ppu_space::HeaderMirroring::Horizontal
+                    crate::bus_impl::ppu_space::HeaderMirroring::Horizontal
                 };
                 // Resolve dynamic (mapper) mirroring unless header enforces FourScreen
                 let dyn_mode = if let Some(cart) = &self.cartridge {
                     if !matches!(cart.mirroring(), crate::cartridge::Mirroring::FourScreen) {
                         cart.mapper.borrow().current_mirroring().map(|m| match m {
                             MapperMirroring::SingleScreenLower => {
-                                crate::bus::ppu_space::DynMirroring::SingleScreenLower
+                                crate::bus_impl::ppu_space::DynMirroring::SingleScreenLower
                             }
                             MapperMirroring::SingleScreenUpper => {
-                                crate::bus::ppu_space::DynMirroring::SingleScreenUpper
+                                crate::bus_impl::ppu_space::DynMirroring::SingleScreenUpper
                             }
                             MapperMirroring::Vertical => {
-                                crate::bus::ppu_space::DynMirroring::Vertical
+                                crate::bus_impl::ppu_space::DynMirroring::Vertical
                             }
                             MapperMirroring::Horizontal => {
-                                crate::bus::ppu_space::DynMirroring::Horizontal
+                                crate::bus_impl::ppu_space::DynMirroring::Horizontal
                             }
                         })
                     } else {
@@ -287,10 +286,11 @@ impl Bus {
     /// - Consumes DMA stall cycles when active.
     /// - Polls PPU NMI latch after each CPU cycle and sets nmi_pending if requested.
     pub fn tick(&mut self, cycles: u32) {
-        crate::bus::clock::tick(self, cycles, |bus| {
+        crate::bus_impl::clock::tick(self, cycles, |bus| {
             // Perform exactly one DMA micro-step (alignment/read/write) using the controller.
             let mut ppu = std::mem::replace(&mut bus.ppu, Ppu::new());
-            let mut dma = std::mem::replace(&mut bus.dma, crate::bus::dma::DmaController::new());
+            let mut dma =
+                std::mem::replace(&mut bus.dma, crate::bus_impl::dma::DmaController::new());
             dma.step_one_cycle(bus, &mut ppu);
             bus.ppu = ppu;
             bus.dma = dma;

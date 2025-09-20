@@ -48,7 +48,7 @@ migrating existing logic out of the legacy path first.
 
 */
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::cpu::state::{CpuState, NEGATIVE, ZERO};
 
 #[derive(Debug, Clone)]

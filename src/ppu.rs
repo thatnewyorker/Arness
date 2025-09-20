@@ -446,11 +446,7 @@ impl Ppu {
                     // 8x16
                     let table = (tile as u16 & 1) * 0x1000;
                     let base_tile = (tile & 0xFE) as u16;
-                    let row_in_sprite = if flip_v {
-                        (sprite_height - 1 - row)
-                    } else {
-                        row
-                    };
+                    let row_in_sprite = if flip_v { sprite_height - 1 - row } else { row };
                     let tile_select = if row_in_sprite < 8 { 0 } else { 1 };
                     let row_in_tile = row_in_sprite & 7;
                     let a = table + (base_tile + tile_select) * 16 + row_in_tile as u16;
@@ -1085,7 +1081,7 @@ mod tests {
     fn sprite_clear_phase_secondary_oam_filled() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus::Bus::new();
+        let mut bus = crate::bus_impl::Bus::new();
         bus.attach_cartridge(cart);
         // Advance until scanline 0 dot 64 (end of CLEAR phase for first visible line).
         while !(bus.ppu().scanline == 0 && bus.ppu().dot == 64) {
@@ -1106,7 +1102,7 @@ mod tests {
         // Build a minimal cart; CHR not relevant for evaluation.
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus::Bus::new();
+        let mut bus = crate::bus_impl::Bus::new();
         bus.attach_cartridge(cart);
 
         {
@@ -1138,7 +1134,6 @@ mod tests {
         // Verify the 8 copied sprites match OAM entries 0..7
         for s in 0..8usize {
             let so = &ppu_ref.secondary_oam[s * 4..s * 4 + 4];
-            let base = s * 4;
             assert_eq!(so[0], 0, "Sprite {} Y mismatch", s);
             assert_eq!(so[1], s as u8, "Sprite {} tile mismatch", s);
             assert_eq!(so[2], 0x00, "Sprite {} attr mismatch", s);
@@ -1156,7 +1151,7 @@ mod tests {
     fn sprite_fetch_phase_fetches_pattern_low_high_for_slot0() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus::Bus::new();
+        let mut bus = crate::bus_impl::Bus::new();
         bus.attach_cartridge(cart);
 
         // Configure PPU: 8x8 sprites, sprite pattern table at $1000 (PPUCTRL bit 3)
@@ -1240,7 +1235,7 @@ mod tests {
     #[test]
     fn framebuffer_dimensions_background_renderer() {
         let mut p = Ppu::new();
-        let bus = crate::bus::Bus::new();
+        let bus = crate::bus_impl::Bus::new();
         p.render_frame(&bus);
         assert_eq!(
             p.framebuffer().len(),
@@ -1253,7 +1248,7 @@ mod tests {
         // Build cart with CHR RAM (0 CHR banks => writable pattern table)
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus::Bus::new();
+        let mut bus = crate::bus_impl::Bus::new();
         bus.attach_cartridge(cart);
 
         // Tile 0 pattern: all pixels color index 1 (low=0xFF, high=0x00)
@@ -1281,7 +1276,7 @@ mod tests {
     fn background_attribute_quadrants() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus::Bus::new();
+        let mut bus = crate::bus_impl::Bus::new();
         bus.attach_cartridge(cart);
 
         // Tile pattern 0: color index 1
@@ -1328,7 +1323,7 @@ mod tests {
     fn sprite_basic_overlay() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus::Bus::new();
+        let mut bus = crate::bus_impl::Bus::new();
         bus.attach_cartridge(cart);
 
         // Background tile 0: color index 1
@@ -1375,7 +1370,7 @@ mod tests {
     fn sprite_zero_hit_basic() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus::Bus::new();
+        let mut bus = crate::bus_impl::Bus::new();
         bus.attach_cartridge(cart);
 
         // Background tile 0: color index 1
@@ -1412,7 +1407,7 @@ mod tests {
     fn sprite_priority_behind_background() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus::Bus::new();
+        let mut bus = crate::bus_impl::Bus::new();
         bus.attach_cartridge(cart);
 
         // Background tile 0: color index 1

@@ -16,7 +16,7 @@ Rationale:
   the entire `Bus` while still delegating to the exact same mapping logic.
 */
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::ppu_bus::PpuBus;
 
 /// Read-only view of the `Bus` that implements `PpuBus`.

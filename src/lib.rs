@@ -19,7 +19,7 @@ In tests, shared iNES builders are available under `crate::test_utils`.
 // Core emulator modules
 pub mod apu;
 #[path = "bus/mod.rs"]
-pub mod bus;
+pub mod bus_impl;
 pub mod cartridge;
 pub mod controller;
 pub mod cpu;
@@ -29,7 +29,7 @@ pub mod ppu;
 pub mod ppu_bus;
 
 // Re-export commonly used types at the crate root for convenience.
-pub use bus::Bus;
+pub use bus_impl::Bus;
 pub use cartridge::Cartridge;
 pub use cpu::core::Cpu;
 

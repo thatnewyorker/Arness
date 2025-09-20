@@ -32,7 +32,7 @@ false otherwise so the dispatcher can continue down the chain.
 
 #![allow(dead_code)]
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::cpu::regs::CpuRegs; // generic trait for arithmetic handler
 
 use crate::cpu::addressing::{
@@ -149,8 +149,7 @@ fn add_page_cross_penalty(cycles: &mut u32, crossed: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::bus::Bus;
+    use crate::bus_impl::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::test_utils::build_nrom_with_prg;

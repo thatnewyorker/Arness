@@ -20,8 +20,8 @@ Behavioral compatibility
   APU tick, mapper IRQ, IRQ line aggregation.
 */
 
-use crate::bus::Bus;
-use crate::bus::interfaces::BusPpuView;
+use crate::bus_impl::Bus;
+use crate::bus_impl::interfaces::BusPpuView;
 use crate::ppu::Ppu;
 
 /// Orchestrate `cycles` CPU cycles worth of work across PPU/APU/DMA with exact ordering.

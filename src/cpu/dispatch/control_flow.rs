@@ -47,7 +47,7 @@ Return Contract
 
 #![allow(dead_code)]
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::cpu::regs::CpuRegs;
 
 use crate::cpu::addressing::{addr_abs, read_word_indirect_bug};
@@ -136,7 +136,7 @@ pub(super) fn handle<C: CpuRegs>(opcode: u8, cpu: &mut C, bus: &mut Bus, cycles:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bus::Bus;
+    use crate::bus_impl::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::cpu::cycles::base_cycles;

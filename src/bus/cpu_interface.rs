@@ -27,8 +27,8 @@ Address map (summary, unchanged):
 - $8000-$FFFF: Cartridge PRG ROM (mapper-controlled)
 */
 
-use crate::bus::Bus;
-use crate::bus::ppu_registers::PpuRegisters;
+use crate::bus_impl::Bus;
+use crate::bus_impl::ppu_registers::PpuRegisters;
 
 /// CPU-visible read from the unified address space.
 pub fn cpu_read(bus: &mut Bus, addr: u16) -> u8 {

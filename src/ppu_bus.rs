@@ -35,7 +35,7 @@ pub trait PpuBus {
     fn ppu_read(&self, addr: u16) -> u8;
 }
 
-impl PpuBus for crate::bus::Bus {
+impl PpuBus for crate::bus_impl::Bus {
     #[inline]
     fn ppu_read(&self, addr: u16) -> u8 {
         // Delegate to the Bus's public accessor (already handles mirroring + mapper).

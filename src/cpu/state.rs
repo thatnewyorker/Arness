@@ -59,7 +59,7 @@ Where:
   C = CARRY
 */
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 
 /// Processor status flag bit masks (canonical definitions).
 pub const CARRY: u8 = 0b0000_0001;

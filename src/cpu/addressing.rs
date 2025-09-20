@@ -58,7 +58,7 @@ can be added later for edge cases (page boundary crossings, indirect wrap quirk)
 
 #![allow(dead_code)]
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::cpu::regs::CpuRegs;
 
 /// Fetch next byte from the instruction stream, incrementing PC.

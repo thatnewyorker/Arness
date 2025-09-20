@@ -71,7 +71,7 @@ Future
 
 */
 
-use crate::bus::Bus;
+use crate::bus_impl::Bus;
 use crate::cpu::cycles::is_rmw;
 use crate::cpu::regs::CpuRegs;
 
