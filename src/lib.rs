@@ -11,7 +11,7 @@ Modules:
 - cpu: 6502 CPU core (facade + state + dispatch + execute modules)
 - mapper: Mapper trait and NROM (mapper 0) implementation
 - ppu: PPU register interface, OAM handling, simple timing and NMI latch
-- ppu_bus: Trait abstraction for PPU memory reads (decouples PPU from full Bus)
+
 
 In tests, shared iNES builders are available under `crate::test_utils`.
 "#]
@@ -24,14 +24,14 @@ pub mod controller;
 pub mod cpu;
 pub mod mapper;
 pub mod mappers;
-pub mod ppu;
-pub mod ppu_bus;
+pub(crate) mod ppu;
 
 // Re-export commonly used types at the crate root for convenience.
 
 pub use bus::Bus;
 pub use cartridge::Cartridge;
 pub use cpu::core::Cpu;
+pub use ppu::{BYTES_PER_PIXEL, NES_HEIGHT, NES_WIDTH, Ppu};
 
 // Shared test utilities (only compiled for tests)
 #[cfg(test)]

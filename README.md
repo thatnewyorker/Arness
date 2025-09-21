@@ -7,7 +7,7 @@ Arness is a work-in-progress Nintendo Entertainment System (NES) emulator core w
 Implemented
 - CPU: 6502 core with cycle counting for documented opcodes; targeted cycle and behavior tests
 - Bus: CPU memory map, RAM mirroring, PPU/APU register access, controllers, OAM DMA, simple timing (PPU ticks 3x per CPU tick)
-- PPU (stub): CPU-visible registers ($2000–$2007), simple VRAM + buffered reads, OAM, basic dot/scanline/frame timing, NMI on vblank
+- PPU: Modularized core with CPU-visible registers ($2000–$2007), VRAM + buffered reads, OAM + DMA, per-dot background rendering, cycle-timed sprite pipeline phases (CLEAR/EVALUATE/FETCH), and basic dot/scanline/frame timing with NMI on vblank; bus-facing PpuBus centralized.
 - APU (stub): Register mirror, $4015 status, simple frame IRQ approximation; no audio output
 - Controllers: $4016/$4017 strobe and serial-read behavior
 - Cartridge: iNES v1 loader; NROM (mapper 0) only; CHR RAM allocated when CHR size is 0
@@ -34,7 +34,7 @@ Not yet implemented
     - dma.rs — DmaController + CpuMemory/OamWriter traits and DMA tests
     - dma_glue.rs — DMA glue trait impls (CpuMemory for Bus, OamWriter for Ppu)
     - clock.rs — Orchestrator (PPU x3 per CPU cycle, DMA micro-step, APU, IRQ/NMI)
-    - interfaces.rs — Lightweight views (e.g., BusPpuView) for borrow-safe access
+    - interfaces.rs — Bus-facing traits (e.g., PpuBus), lightweight views (BusPpuView), and test mocks
     - ram.rs — 2 KiB CPU RAM with mirroring
     - ram_helpers.rs — CPU RAM mirrored access wrappers (internal helpers)
   - cartridge.rs — iNES v1 loader, NROM cartridge
@@ -43,8 +43,14 @@ Not yet implemented
   - lib.rs — Library exports
   - main.rs — Demo runner (builds an in-memory NROM program and runs until one PPU frame)
   - mapper.rs — Mapper trait + NROM implementation
-  - ppu.rs — PPU core (registers, OAM, basic rendering/timing)
-  - ppu_bus.rs — PpuBus trait
+  - ppu/ — PPU core (state + submodules)
+    - mod.rs — PPU state and public API (struct Ppu, constants)
+    - registers.rs — CPU-visible register semantics ($2000–$2007)
+    - renderer.rs — timing orchestration and per-dot tick
+    - fetch.rs — background fetch (per dot)
+    - sprite.rs — sprite shift registers and pixel production
+    - oam_eval.rs — sprite evaluation phases (CLEAR/EVALUATE/FETCH)
+    - memory.rs — VRAM/OAM peek/poke and OAM DMA helpers
   - test_utils/ — Shared iNES builder helpers for tests
 - Cargo.toml
 
@@ -88,7 +94,7 @@ Unit tests cover CPU cycle counts, bus behavior (mirroring, DMA, registers), PPU
   - Extended BusPpuView to support construction from parts (BusPpuView::from_parts), borrowing only PPU-related subfields.
   - Removed mem::replace usage in timing/orchestrator paths (PPU stepping and DMA micro-steps) in favor of non-overlapping borrows.
 - Deprecation: BusPpuView::new(&Bus) is deprecated in favor of BusPpuView::from_parts(...) to avoid whole-Bus immutable borrows in orchestrator code.
-- API surface: BusPpuView and CpuMemoryView are internal to the bus module; downstream consumers should use the Bus façade and PpuBus trait where needed.
+- API surface: BusPpuView and CpuMemoryView are internal to the bus module; the PpuBus trait and related test mocks are centralized in bus/interfaces.rs; downstream consumers should use the Bus façade and the canonical crate::bus::interfaces::PpuBus.
 - Reorg: Extracted PPU mapping helpers to bus/ppu_memory.rs, moved DMA glue impls to bus/dma_glue.rs, and added bus/ram_helpers.rs; Bus methods delegate to these helpers to keep the Bus façade (in bus/mod.rs) focused while preserving behavior.
 - Tests: Added unit tests covering DMA alignment behavior (513/514 cycles), read/write alternation, RAM mirroring via CpuMemoryView, and end-to-end OAM DMA correctness.
 
