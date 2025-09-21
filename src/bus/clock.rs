@@ -43,16 +43,7 @@ where
         //    We move the PPU out briefly to avoid overlapping borrows while still
         //    allowing immutable access to the Bus for PPU memory reads.
         {
-            let mut ppu = std::mem::replace(&mut bus.ppu, Ppu::new());
-            for _ in 0..3 {
-                let view = crate::bus::interfaces::BusPpuView::from_parts(
-                    bus.ppu_mem(),
-                    bus.cartridge.as_ref(),
-                );
-                ppu.tick(&view);
-                bus.ppu_cycle = bus.ppu_cycle.wrapping_add(1);
-            }
-            bus.ppu = ppu;
+            bus.step_ppu_three();
         }
 
         // 3) DMA micro-step (if active). The callback is responsible for exactly one

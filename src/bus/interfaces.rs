@@ -7,8 +7,8 @@ reads, allowing the PPU to operate with a read-only view of the bus to avoid
 mutable borrow contention during ticking and rendering.
 
 Usage:
-- Construct a `BusPpuView` with `BusPpuView::new(&bus)` and pass it where a
-  `PpuBus` is required (e.g., `Ppu::tick` or rendering helpers).
+- Prefer constructing `BusPpuView` with `BusPpuView::from_parts(bus.ppu_mem(), bus.cartridge.as_ref())` so only the required subfields are borrowed and the whole `Bus` is not immutably borrowed. This enables simultaneous `&mut Ppu` borrows during ticking and rendering.
+- The `new(&Bus)` convenience is deprecated; use `from_parts(...)` to avoid whole-`Bus` borrows.
 
 Rationale:
 - The PPU needs read-only access to the PPU-visible address space for pattern,
@@ -27,13 +27,14 @@ use crate::ppu_bus::PpuBus;
 /// This view forwards PPU address-space reads to `Bus::ppu_read`, preserving
 /// cartridge/mapper and mirroring behavior, without exposing any mutable API.
 #[derive(Clone, Copy)]
-pub struct BusPpuView<'a> {
+pub(in crate::bus) struct BusPpuView<'a> {
     ppu_mem: &'a PpuAddressSpace,
     cartridge: Option<&'a Cartridge>,
 }
 
 impl<'a> BusPpuView<'a> {
     /// Create a new read-only PPU view borrowing only the fields the PPU needs.
+    #[deprecated(note = "Use BusPpuView::from_parts(...) to avoid borrowing the whole Bus")]
     #[inline]
     pub fn new(bus: &'a Bus) -> Self {
         Self {

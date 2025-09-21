@@ -287,13 +287,30 @@ impl Bus {
     /// - Polls PPU NMI latch after each CPU cycle and sets nmi_pending if requested.
     pub fn tick(&mut self, cycles: u32) {
         crate::bus::clock::tick(self, cycles, |bus| {
-            // Perform exactly one DMA micro-step (alignment/read/write) using the controller.
-            let mut ppu = std::mem::replace(&mut bus.ppu, Ppu::new());
-            let mut dma = std::mem::replace(&mut bus.dma, crate::bus::dma::DmaController::new());
-            dma.step_one_cycle(bus, &mut ppu);
-            bus.ppu = ppu;
-            bus.dma = dma;
+            // Perform exactly one DMA micro-step (alignment/read/write) using the controller,
+            // borrowing only the necessary Bus subfields to avoid overlapping borrows.
+            let mut mem_view = crate::bus::dma::CpuMemoryView::from_parts(
+                &mut bus.ram,
+                bus.cartridge.as_mut(),
+                &mut bus.controllers,
+            );
+            let ppu = &mut bus.ppu;
+            let dma = &mut bus.dma;
+            dma.step_one_cycle(&mut mem_view, ppu);
         });
+    }
+
+    /// Step the PPU three times (one CPU cycle worth) using field-level borrows.
+    /// Constructs a short-lived BusPpuView from parts to avoid borrowing the whole Bus.
+    pub fn step_ppu_three(&mut self) {
+        for _ in 0..3 {
+            let view = crate::bus::interfaces::BusPpuView::from_parts(
+                &self.ppu_mem,
+                self.cartridge.as_ref(),
+            );
+            self.ppu.tick(&view);
+            self.ppu_cycle = self.ppu_cycle.wrapping_add(1);
+        }
     }
 
     /// Return the total number of CPU cycles elapsed (external accessor for tests).
@@ -346,9 +363,9 @@ impl Bus {
         // DEPRECATED: legacy frame-level renderer retained temporarily for tests.
         // The cycle-accurate pipeline should be driven by repeated calls to tick().
         // Once per-dot background + sprite rendering is complete, this will be removed.
-        let mut ppu = std::mem::replace(&mut self.ppu, Ppu::new());
-        ppu.render_frame(&*self); // Fallback path (will be phased out)
-        self.ppu = ppu;
+        let view =
+            crate::bus::interfaces::BusPpuView::from_parts(&self.ppu_mem, self.cartridge.as_ref());
+        self.ppu.render_frame(&view);
     }
 
     pub fn controller_mut(&mut self, idx: usize) -> Option<&mut Controller> {

@@ -79,8 +79,6 @@ pub use controller_registers::*;
 pub use cpu_interface::*;
 pub use dma::*;
 pub use integration_helpers::*;
-pub use interfaces::BusPpuView;
-pub use interfaces::*;
 pub use nametable_mapper::*;
 pub use ppu_registers::*;
 pub use ppu_space::*;
