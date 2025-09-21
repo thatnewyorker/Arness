@@ -10,9 +10,12 @@ Modules and responsibilities
 - cpu_interface: CPU-visible address decoder and helpers (read/write, read_word); delegates to devices.
 - ppu_registers: CPU-visible PPU register window (0x2000-0x3FFF, with mirroring and PPUDATA semantics).
 - ppu_space: PPU address-space mapping (nametables, palette, mirroring) via `PpuAddressSpace` and pure helpers.
+- ppu_memory: Bus-level PPU memory helpers that resolve header/dynamic mirroring and delegate to mapper/PPU RAM.
 - dma: OAM DMA controller (`DmaController`) and minimal traits (`CpuMemory`, `OamWriter`) for decoupling.
+- dma_glue: DMA glue impls (e.g., `CpuMemory` for `Bus`, `OamWriter` for `Ppu`) kept small and internal.
 - clock: tick/scheduler orchestration (advance CPU, step PPU 3x, DMA micro-step, latch NMI, step APU, aggregate IRQ).
 - interfaces: lightweight views/traits to reduce borrowing friction (e.g., `BusPpuView` for read-only PPU access).
+- ram_helpers: CPU RAM mirrored access wrappers (internal helpers used by the Bus façade).
 - integration_helpers: convenience wrappers and compatibility accessors used by tests and integration code.
 - nametable_mapper: optional pure mapping logic for advanced mirroring strategies.
 
@@ -27,14 +30,13 @@ Migration notes
 #![allow(unused_mut)]
 
 // Inlined Bus implementation (migrated from legacy.rs) wrapped into a module to accept inner doc comments
-pub mod bus_impl {
-    include!("bus_impl.rs");
-}
+pub mod bus_impl;
 pub use bus_impl::Bus;
 
 /// CPU-visible memory map and helpers (dispatcher for address ranges).
 pub mod cpu_interface;
 
+pub mod ppu_memory;
 /// PPU registers handler (CPU-visible 0x2000-0x3FFF).
 pub mod ppu_registers;
 /// PPU address-space mapping: nametables, palette, mirroring rules.
@@ -53,8 +55,10 @@ pub mod apu_registers;
 /// Controller ($4016/$4017) handler.
 pub mod controller_registers;
 pub mod dma;
+pub mod dma_glue;
 /// Cycle-accurate OAM DMA controller.
 pub mod ram;
+pub mod ram_helpers;
 
 /// Tick/scheduler orchestration for CPU/PPU/APU/DMA and interrupts.
 pub mod clock;
