@@ -38,7 +38,7 @@ Return Contract
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs;
 
 use crate::cpu::addressing::{
@@ -210,7 +210,7 @@ fn add_page_cross_penalty(cycles: &mut u32, crossed: bool) {
 
 #[cfg(test)]
 mod tests {
-    use crate::bus_impl::Bus;
+    use crate::bus::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::test_utils::build_nrom_with_prg;
@@ -247,9 +247,9 @@ mod tests {
         bus.write(0x0010, 0xFF);
         bus.write(0x0011, 0x12);
         assert_eq!(cpu.step(&mut bus), 2); // LDY
-        // Crossing expected adds +1 making total = base(5) for ORA (ind),Y w/ cross
+        // Crossing expected adds +1 making total = base(5) + 1 = 6 for ORA (ind),Y w/ cross
         let cycles = cpu.step(&mut bus);
-        assert_eq!(cycles, 5);
+        assert_eq!(cycles, 6);
     }
 
     #[test]

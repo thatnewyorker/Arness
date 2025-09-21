@@ -57,7 +57,7 @@ Design Notes
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs;
 use crate::cpu::state::{BREAK, CARRY, NEGATIVE, OVERFLOW, UNUSED, ZERO};
 
@@ -421,22 +421,25 @@ pub(crate) fn branch_offset<C: CpuRegs>(cpu: &mut C, offset: i8) {
 
 /// Fetch displacement, optionally apply branch, return extra cycles (1 or 2) if taken.
 pub(crate) fn branch_cond<C: CpuRegs>(cpu: &mut C, bus: &mut Bus, take: bool) -> u32 {
-    // Fetch displacement byte then advance PC.
+    // Fetch displacement byte; compute target relative to current PC (operand location).
     let pc = cpu.pc();
     let raw = bus.read(pc);
-    cpu.advance_pc_one();
     let offset = raw as i8;
+    let pc_after = pc.wrapping_add(1);
 
     if !take {
+        // Not taken: consume the displacement by advancing PC one byte.
+        cpu.set_pc(pc_after);
         return 0;
     }
 
-    let old_pc = cpu.pc();
-    branch_offset(cpu, offset);
+    // Taken: target = PC+1 + signed offset (compute relative to post-operand PC).
+    let target = (pc_after as i16).wrapping_add(offset as i16) as u16;
     let mut extra = 1; // taken
-    if (old_pc & 0xFF00) != (cpu.pc() & 0xFF00) {
+    if (pc_after & 0xFF00) != (target & 0xFF00) {
         extra += 1;
     }
+    cpu.set_pc(target);
     extra
 }
 
@@ -494,11 +497,11 @@ mod tests {
     #[test]
     fn branch_cond_page_cross() {
         let (mut cpu, mut bus) = setup();
+        cpu.set_pc(0x00FE);
         bus.write(cpu.pc(), 0x02); // offset +2
-        cpu.set_pc(0x80FF);
         let extra = branch_cond(cpu.state_mut(), &mut bus, true);
         assert_eq!(extra, 2);
-        assert_eq!(cpu.pc(), 0x8101);
+        assert_eq!(cpu.pc(), 0x0101);
     }
 
     #[test]

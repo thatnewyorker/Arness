@@ -4,13 +4,10 @@ finalize.rs - Centralized instruction finalization & trivial/unknown opcode hand
 Overview
 ========
 This module consolidates:
-  1. Timing finalization (`finalize_and_tick`) that applies the RMW tick adjustment
-     and drives the bus cycle ticking uniformly for all dispatch paths.
-  2. A trivial / unknown opcode handler (`handle_trivial_or_unknown`) used by the
-     fallback dispatcher for:
-        - NOP (0xEA): No state changes besides cycle consumption.
-        - Unknown / unimplemented opcodes: Current project semantics set `cpu.halted = true`
-          after consuming the baseline cycles.
+- Timing finalization (`finalize_and_tick`) that applies the RMW tick adjustment and drives the bus cycle ticking uniformly for all dispatch paths.
+- A trivial / unknown opcode handler (`handle_trivial_or_unknown`) used by the fallback dispatcher for:
+  - NOP (0xEA): No state changes besides cycle consumption.
+  - Unknown / unimplemented opcodes: Current project semantics set `cpu.halted = true` after consuming the baseline cycles.
 
 Rationale
 =========
@@ -22,18 +19,15 @@ finalization implementation without duplicating RMW / bus tick semantics.
 Responsibilities
 ================
 - Provide `finalize_and_tick`:
-    * Given an opcode and its externally reported cycle count, tick the bus for
-      either `cycles` or `cycles - 2` (when the opcode is RMW per `is_rmw`).
-      The returned value remains the unadjusted `cycles` reported to callers.
+  - Given an opcode and its externally reported cycle count, tick the bus for either `cycles` or `cycles - 2` (when the opcode is RMW per `is_rmw`). The returned value remains the unadjusted `cycles` reported to callers.
 - Provide `handle_trivial_or_unknown`:
-    * For NOP (0xEA): Do nothing but finalize timing.
-    * For any other opcode reaching it: mark CPU halted (unknown) then finalize timing.
+  - For NOP (0xEA): Do nothing but finalize timing.
+  - For any other opcode reaching it: mark CPU halted (unknown) then finalize timing.
 
 Non-Responsibilities
 ====================
 - Does NOT compute base cycle counts (caller must have them already).
-- Does NOT apply page-cross or branch penalties (caller must incorporate those
-  before calling `finalize_and_tick`).
+- Does NOT apply page-cross or branch penalties (caller must incorporate those before calling `finalize_and_tick`).
 - Does NOT mutate PC (fetch/advance happens before dispatch reaches here).
 - Does NOT attempt to emulate unofficial/undocumented opcode semantics.
 
@@ -42,11 +36,10 @@ Integration Points
 Fallback dispatcher (`fallback.rs`):
   - After a family handler returns true: call `finalize_and_tick`.
   - If no family handler claims an opcode:
-       return finalize::handle_trivial_or_unknown(opcode, cpu, bus, cycles);
+    return finalize::handle_trivial_or_unknown(opcode, cpu, bus, cycles);
 
 Table-driven dispatcher (future):
-  - After determining total cycles for an opcode, call `finalize_and_tick`
-    instead of open-coding RMW adjustments.
+  - After determining total cycles for an opcode, call `finalize_and_tick` instead of open-coding RMW adjustments.
 
 RMW Adjustment Semantics
 ========================
@@ -58,20 +51,18 @@ fine-grained microcycle modeling elsewhere if added later.
 Testing
 =======
 Unit tests verify:
-  - NOP returns its cycles and does not halt the CPU.
-  - Unknown opcode halts and returns its passed cycle count.
-  - RMW adjustment path: a synthetic call emulating an RMW opcode ticks `cycles - 2`.
+- NOP returns its cycles and does not halt the CPU.
+- Unknown opcode halts and returns its passed cycle count.
+- RMW adjustment path: a synthetic call emulating an RMW opcode ticks `cycles - 2`.
 
 Future
 ======
-- If undocumented opcode support is added later, this module can expose an
-  extension hook (e.g., `handle_extended_opcode`).
-- A microcycle trace feature could be layered on top by capturing the
-  tick count before/after finalization.
+- If undocumented opcode support is added later, this module can expose an extension hook (e.g., `handle_extended_opcode`).
+- A microcycle trace feature could be layered on top by capturing the tick count before/after finalization.
 
 */
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::cycles::is_rmw;
 use crate::cpu::regs::CpuRegs;
 

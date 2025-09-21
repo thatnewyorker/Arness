@@ -36,7 +36,7 @@ are handled centrally by the dispatcher.
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::execute::{branch_cond, get_flag};
 use crate::cpu::regs::CpuRegs;
 use crate::cpu::state::{CARRY, NEGATIVE, OVERFLOW, ZERO};
@@ -67,7 +67,7 @@ pub(super) fn handle<C: CpuRegs>(opcode: u8, cpu: &mut C, bus: &mut Bus, cycles:
 
 #[cfg(test)]
 mod tests {
-    use crate::bus_impl::Bus;
+    use crate::bus::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::test_utils::build_nrom_with_prg;
@@ -106,13 +106,13 @@ mod tests {
         // Layout: 0x00..0xFE: NOP, 0xFF: BCC +0x01 (opcode + operand at boundary),
         // then target at next page (0x0101 relative position).
         let mut prg = vec![];
-        prg.extend(std::iter::repeat(0xEA).take(0x00FF)); // NOP padding to byte 0x00FE
+        prg.extend(std::iter::repeat_n(0xEA, 0x00FD)); // NOP padding adjusted to place operand at 0x80FE
         prg.push(0x90); // BCC
         prg.push(0x01); // displacement -> cross to next page
         prg.push(0x00); // BRK at target (simplify)
         let (mut cpu, mut bus) = setup(&prg);
         // Consume the padding NOPs
-        for _ in 0..0x00FF {
+        for _ in 0..0x00FD {
             assert_eq!(cpu.step(&mut bus), 2);
         }
         // Branch: taken + page cross => 4 cycles
@@ -122,7 +122,7 @@ mod tests {
     #[test]
     fn branch_taken_sets_pc_correctly() {
         // BNE +0x02 (Z clear after reset) should skip over one byte (NOP) to BRK
-        let (mut cpu, mut bus) = setup(&[0xD0, 0x02, 0xEA, 0x00]);
+        let (mut cpu, mut bus) = setup(&[0xD0, 0x01, 0xEA, 0x00]);
         let c = cpu.step(&mut bus);
         assert_eq!(c, 3); // taken, no cross
         // Next step should be BRK (0x00) not NOP

@@ -92,7 +92,7 @@ pub fn map_nametable_addr(
 ) -> usize {
     // Reduce to $2000-$2FFF (mirror $3000-$3EFF down)
     let a = (addr.wrapping_sub(0x2000)) & 0x0FFF;
-    let table = (a / 0x0400) as u16; // 0..3
+    let table = a / 0x0400; // 0..3
     let offset = (a % 0x0400) as usize;
 
     // Select bank based on dynamic override if present (unless header forces FourScreen),
@@ -153,6 +153,12 @@ pub fn map_nametable_addr(
 pub struct PpuAddressSpace {
     pub nt_ram: [u8; 0x0800],  // 2 KiB nametable RAM
     pub palette_ram: [u8; 32], // 32-byte palette RAM
+}
+
+impl Default for PpuAddressSpace {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PpuAddressSpace {

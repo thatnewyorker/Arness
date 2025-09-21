@@ -9,7 +9,8 @@ registers and execution control booleans. It intentionally excludes:
   - Bus / memory logic
   - Instruction decode / dispatch logic
   - Timing / cycle accounting
-Those live in higher layers (dispatch, execute, bus modules).
+
+  Those live in higher layers (dispatch, execute, bus modules).
 
 Rationale
 =========
@@ -59,7 +60,7 @@ Where:
   C = CARRY
 */
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 
 /// Processor status flag bit masks (canonical definitions).
 pub const CARRY: u8 = 0b0000_0001;

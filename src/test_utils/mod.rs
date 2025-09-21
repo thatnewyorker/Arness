@@ -57,12 +57,12 @@ pub fn build_ines(
 
     // PRG ROM payload (pattern-filled for tests)
     if prg_16k > 0 {
-        bytes.extend(std::iter::repeat(0xAA).take(prg_16k * 16 * 1024));
+        bytes.extend(std::iter::repeat_n(0xAA, prg_16k * 16 * 1024));
     }
 
     // CHR ROM payload (if present)
     if chr_8k > 0 {
-        bytes.extend(std::iter::repeat(0xCC).take(chr_8k * 8 * 1024));
+        bytes.extend(std::iter::repeat_n(0xCC, chr_8k * 8 * 1024));
     }
 
     bytes
@@ -119,13 +119,13 @@ pub fn set_vectors_in_prg(prg: &mut [u8], reset: u16, nmi: u16, irq: u16) {
     match prg.len() {
         16384 => {
             let base = 0x3FFA;
-            write_le_u16(prg, base + 0, nmi);
+            write_le_u16(prg, base, nmi);
             write_le_u16(prg, base + 2, reset);
             write_le_u16(prg, base + 4, irq);
         }
         32768 => {
             let base = 0x7FFA;
-            write_le_u16(prg, base + 0, nmi);
+            write_le_u16(prg, base, nmi);
             write_le_u16(prg, base + 2, reset);
             write_le_u16(prg, base + 4, irq);
         }
@@ -145,7 +145,7 @@ fn write_le_u16(buf: &mut [u8], offset: usize, value: u16) {
 /// Convenience wrapper for cases where only the RESET vector needs to be overridden.
 /// - `reset`: optional RESET vector address. If `None`, defaults to 0x8000 (same as other vectors).
 /// - NMI and IRQ vectors remain at 0x8000 to match the existing default behavior.
-/// This keeps test call sites concise when they only care about the program start address.
+///   This keeps test call sites concise when they only care about the program start address.
 pub fn build_nrom_with_prg_reset_only(
     prg: &[u8],
     chr_8k: usize,
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(rom[7], 0x00);
         assert_eq!(rom[8], 1);
         // Basic size sanity
-        assert_eq!(rom.len(), 16 + 2 * 16 * 1024 + 1 * 8 * 1024);
+        assert_eq!(rom.len(), 16 + 2 * 16 * 1024 + 8 * 1024);
     }
 
     #[test]
@@ -207,8 +207,9 @@ mod tests {
         assert_eq!(rom[4], 1);
         // CHR size units
         assert_eq!(rom[5], 1);
-        // Vectors present (RESET low byte) at 0x3FFC within PRG
+        // RESET vector should be 0x8000 => low=0x00 at 0x3FFC, high=0x80 at 0x3FFD
         let prg_start = 16;
-        assert_ne!(rom[prg_start + 0x3FFC], 0x00);
+        assert_eq!(rom[prg_start + 0x3FFC], 0x00);
+        assert_eq!(rom[prg_start + 0x3FFD], 0x80);
     }
 }

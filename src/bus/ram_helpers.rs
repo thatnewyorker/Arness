@@ -5,7 +5,7 @@ RAM helper wrappers
 Purpose
 - Provide thin helper functions for mirrored CPU RAM access that operate on a `&Bus`/`&mut Bus`.
 - Centralize RAM read/write wrappers so the `Bus` façade can delegate to these helpers,
-  keeping `bus_impl.rs` smaller while preserving hot-path efficiency.
+  keeping the Bus façade focused while preserving hot-path efficiency.
 
 Scope and visibility
 - These helpers are internal to the `bus` module (`pub(in crate::bus)`), not part of the public API.
@@ -27,15 +27,11 @@ Notes
 #![allow(unused_macros)]
 
 #[inline]
-pub(in crate::bus) fn ram_read_mirrored(bus: &crate::bus::bus_impl::Bus, addr: u16) -> u8 {
+pub(in crate::bus) fn ram_read_mirrored(bus: &crate::bus::Bus, addr: u16) -> u8 {
     bus.ram().read(addr)
 }
 
 #[inline]
-pub(in crate::bus) fn ram_write_mirrored(
-    bus: &mut crate::bus::bus_impl::Bus,
-    addr: u16,
-    value: u8,
-) {
+pub(in crate::bus) fn ram_write_mirrored(bus: &mut crate::bus::Bus, addr: u16, value: u8) {
     bus.ram_mut().write(addr, value);
 }

@@ -31,15 +31,15 @@ Behavior Notes
 This module is intentionally minimal; as table coverage grows, its usage will diminish.
 */
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs;
 // Shared modular helpers
 use crate::cpu::cycles::base_cycles;
 use crate::cpu::dispatch::finalize::{finalize_and_tick, handle_trivial_or_unknown};
 use crate::cpu::execute::{dex, dey, inx, iny};
-/// Finalization now delegated to `fallback_final` (no local duplicate helper).
-
 /// Execute one instruction using the match-based fallback dispatcher (post-interrupt / DMA already handled).
+///
+/// Finalization now delegated to `fallback_final` (no local duplicate helper).
 /// Returns the total cycles consumed (including penalties).
 pub(crate) fn step<C: CpuRegs>(cpu: &mut C, bus: &mut Bus) -> u32 {
     // Fetch opcode (interrupts & DMA already handled by orchestrator)
@@ -146,14 +146,14 @@ mod tests {
     fn branch_taken_page_cross_cycles() {
         // Place branch near page boundary to force crossing
         let mut prg = vec![];
-        prg.extend(std::iter::repeat(0xEA).take(0x00FF)); // fill to $80FF with NOP
+        prg.extend(std::iter::repeat_n(0xEA, 0x00FC)); // pad to place CLC at $80FC so BCC crosses
         prg.push(0x18); // CLC
         prg.push(0x90); // BCC
         prg.push(0x01); // +1 -> crosses
         prg.push(0xEA);
         prg.push(0x00); // BRK
         let (mut cpu, mut bus) = setup(&prg);
-        for _ in 0..0x00FF {
+        for _ in 0..0x00FC {
             assert_eq!(cpu.step(&mut bus), 2);
         }
         assert_eq!(cpu.step(&mut bus), 2); // CLC

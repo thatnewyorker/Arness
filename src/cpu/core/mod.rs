@@ -48,12 +48,18 @@ migrating existing logic out of the legacy path first.
 
 */
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::state::{CpuState, NEGATIVE, ZERO};
 
 #[derive(Debug, Clone)]
 pub struct Cpu {
     state: CpuState,
+}
+
+impl Default for Cpu {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Cpu {

@@ -382,14 +382,16 @@ impl Ppu {
             let base = s * 4;
             let y = self.oam[base] as i16;
             let top = y as i32;
-            let bottom = top + spr_h as i32;
+            let bottom = top + spr_h;
             if bottom <= 0 || top >= NES_HEIGHT as i32 {
                 continue;
             }
-            for sy in top.max(0) as usize..bottom.min(NES_HEIGHT as i32) as usize {
-                if scan_counts[sy] < 250 {
-                    scan_counts[sy] += 1;
-                    if scan_counts[sy] > 8 {
+            let start = top.max(0) as usize;
+            let end = bottom.min(NES_HEIGHT as i32) as usize;
+            for count in scan_counts[start..end].iter_mut() {
+                if *count < 250 {
+                    *count += 1;
+                    if *count > 8 {
                         self.set_sprite_overflow(true);
                         break;
                     }
@@ -645,16 +647,16 @@ impl Ppu {
                                 } else {
                                     0x0000
                                 };
-                                let row = (row_in_sprite & 7) as u16;
+                                let row = row_in_sprite & 7;
                                 let a = base_sel + (tile as u16) * 16 + row;
                                 (a, a + 8)
                             } else {
                                 // 8x16 sprites: table from tile LSB; tile index even/odd select top/bottom
                                 let table = (tile as u16 & 1) * 0x1000;
                                 let base_tile = (tile & 0xFE) as u16;
-                                let row = row_in_sprite as u16; // 0..15
+                                let row = row_in_sprite; // 0..15
                                 let tile_select = if row < 8 { 0 } else { 1 };
-                                let row_in_tile = (row & 7) as u16;
+                                let row_in_tile = row & 7;
                                 let a = table + (base_tile + tile_select) * 16 + row_in_tile;
                                 (a, a + 8)
                             };
@@ -1081,7 +1083,7 @@ mod tests {
     fn sprite_clear_phase_secondary_oam_filled() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus_impl::Bus::new();
+        let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
         // Advance until scanline 0 dot 64 (end of CLEAR phase for first visible line).
         while !(bus.ppu().scanline == 0 && bus.ppu().dot == 64) {
@@ -1102,7 +1104,7 @@ mod tests {
         // Build a minimal cart; CHR not relevant for evaluation.
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus_impl::Bus::new();
+        let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
         {
@@ -1139,11 +1141,10 @@ mod tests {
             assert_eq!(so[2], 0x00, "Sprite {} attr mismatch", s);
             assert_eq!(so[3], s as u8, "Sprite {} X mismatch", s);
         }
-        // Next slot (slot 8) should remain cleared (first byte 0xFF) indicating no 9th copied.
-        assert_eq!(
-            ppu_ref.secondary_oam[32 - 4],
-            0xFF,
-            "Slot 8 unexpectedly populated"
+        // Overflow should be set because more than 8 sprites were in-range.
+        assert!(
+            ppu_ref.sprite_overflow(),
+            "Expected sprite overflow when more than 8 sprites are in-range"
         );
     }
 
@@ -1151,7 +1152,7 @@ mod tests {
     fn sprite_fetch_phase_fetches_pattern_low_high_for_slot0() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus_impl::Bus::new();
+        let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
         // Configure PPU: 8x8 sprites, sprite pattern table at $1000 (PPUCTRL bit 3)
@@ -1169,8 +1170,8 @@ mod tests {
         let tile: u8 = 2;
         let low: u8 = 0xA5;
         let high: u8 = 0x5A;
-        bus.ppu_write(0x1000 + (tile as u16) * 16 + 0, low);
-        bus.ppu_write(0x1000 + (tile as u16) * 16 + 8 + 0, high);
+        bus.ppu_write(0x1000 + (tile as u16) * 16, low);
+        bus.ppu_write(0x1000 + (tile as u16) * 16 + 8, high);
 
         // Advance to the end of FETCH window on pre-render line (-1, dots 257..320)
         while !(bus.ppu().scanline == -1 && bus.ppu().dot == 320) {
@@ -1221,8 +1222,8 @@ mod tests {
         let mut p = Ppu::new();
         p.write_reg(0x2003, 0xFE);
         let mut buf = [0u8; 256];
-        for i in 0..256 {
-            buf[i] = i as u8;
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = i as u8;
         }
         p.oam_dma_copy(&buf);
         assert_eq!(p.peek_oam(0xFE), 0x00);
@@ -1235,7 +1236,7 @@ mod tests {
     #[test]
     fn framebuffer_dimensions_background_renderer() {
         let mut p = Ppu::new();
-        let bus = crate::bus_impl::Bus::new();
+        let bus = crate::bus::Bus::new();
         p.render_frame(&bus);
         assert_eq!(
             p.framebuffer().len(),
@@ -1248,13 +1249,13 @@ mod tests {
         // Build cart with CHR RAM (0 CHR banks => writable pattern table)
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus_impl::Bus::new();
+        let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
         // Tile 0 pattern: all pixels color index 1 (low=0xFF, high=0x00)
         for row in 0..8 {
-            bus.ppu_write(0x0000 + row as u16, 0xFF);
-            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
+            bus.ppu_write(row as u16, 0xFF);
+            bus.ppu_write(8 + row as u16, 0x00);
         }
         // Name table top-left tile = 0
         bus.ppu_write(0x2000, 0x00);
@@ -1276,13 +1277,13 @@ mod tests {
     fn background_attribute_quadrants() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus_impl::Bus::new();
+        let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
         // Tile pattern 0: color index 1
         for row in 0..8 {
-            bus.ppu_write(0x0000 + row as u16, 0xFF);
-            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
+            bus.ppu_write(row as u16, 0xFF);
+            bus.ppu_write(8 + row as u16, 0x00);
         }
         // Place tile 0 at four quadrants within first attribute block
         for &(tx, ty) in &[(0u16, 0u16), (2, 0), (0, 2), (2, 2)] {
@@ -1323,13 +1324,13 @@ mod tests {
     fn sprite_basic_overlay() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus_impl::Bus::new();
+        let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
         // Background tile 0: color index 1
         for row in 0..8 {
-            bus.ppu_write(0x0000 + row as u16, 0xFF);
-            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
+            bus.ppu_write(row as u16, 0xFF);
+            bus.ppu_write(8 + row as u16, 0x00);
         }
         bus.ppu_write(0x2000, 0x00);
         bus.ppu_write(0x23C0, 0x00);
@@ -1370,13 +1371,13 @@ mod tests {
     fn sprite_zero_hit_basic() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus_impl::Bus::new();
+        let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
         // Background tile 0: color index 1
         for row in 0..8 {
-            bus.ppu_write(0x0000 + row as u16, 0xFF);
-            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
+            bus.ppu_write(row as u16, 0xFF);
+            bus.ppu_write(8 + row as u16, 0x00);
         }
         bus.ppu_write(0x2000, 0x00);
         bus.ppu_write(0x23C0, 0x00);
@@ -1407,13 +1408,13 @@ mod tests {
     fn sprite_priority_behind_background() {
         let rom = crate::test_utils::build_ines(1, 0, 0, 0, 1, None);
         let cart = crate::cartridge::Cartridge::from_ines_bytes(&rom).unwrap();
-        let mut bus = crate::bus_impl::Bus::new();
+        let mut bus = crate::bus::Bus::new();
         bus.attach_cartridge(cart);
 
         // Background tile 0: color index 1
         for row in 0..8 {
-            bus.ppu_write(0x0000 + row as u16, 0xFF);
-            bus.ppu_write(0x0000 + 8 + row as u16, 0x00);
+            bus.ppu_write(row as u16, 0xFF);
+            bus.ppu_write(8 + row as u16, 0x00);
         }
         bus.ppu_write(0x2000, 0x00);
         bus.ppu_write(0x23C0, 0x00);
@@ -1431,10 +1432,13 @@ mod tests {
         bus.ppu_mut().mask = 0x18;
         {
             let p = bus.ppu_mut();
-            p.oam[0] = 0;
-            p.oam[1] = 1;
+            // Clear all other sprites to avoid unintended overlaps; Y=0xFF marks empty.
+            p.oam.fill(0xFF);
+            // Define a single sprite 0 behind background at (0,0) using tile 1
+            p.oam[0] = 0; // Y
+            p.oam[1] = 1; // tile
             p.oam[2] = 0x20; // behind background
-            p.oam[3] = 0;
+            p.oam[3] = 0; // X
         }
         bus.render_ppu_frame();
         // Expect background color at (0,0)

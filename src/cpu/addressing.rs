@@ -58,7 +58,7 @@ can be added later for edge cases (page boundary crossings, indirect wrap quirk)
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs;
 
 /// Fetch next byte from the instruction stream, incrementing PC.
@@ -160,7 +160,7 @@ pub(crate) fn addr_ind_y_pc<C: CpuRegs>(cpu: &mut C, bus: &mut Bus) -> (u16, boo
 #[inline]
 pub(crate) fn read_word_zp(bus: &mut Bus, base: u8) -> u16 {
     let lo = bus.read(base as u16) as u16;
-    let hi = bus.read(((base as u16 + 1) & 0x00FF) as u16) as u16;
+    let hi = bus.read((base as u16 + 1) & 0x00FF) as u16;
     (hi << 8) | lo
 }
 
@@ -204,6 +204,8 @@ mod tests {
         assert_eq!(fetch_byte(cpu.state_mut(), &mut bus), 0xA2);
         let x_val = fetch_byte(cpu.state_mut(), &mut bus); // #$10
         cpu.set_x(x_val);
+        // Consume LDA abs,X opcode so PC points to operand
+        assert_eq!(fetch_byte(cpu.state_mut(), &mut bus), 0xBD);
         let (addr, crossed) = addr_abs_x_pc(cpu.state_mut(), &mut bus);
         assert!(crossed);
         assert_eq!(addr, 0x80F5 + 0x10);

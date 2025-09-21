@@ -59,7 +59,7 @@ use crate::cpu::{
         fetch_byte,
     },
     execute::{lda, set_flag},
-    state::{CARRY, ZERO},
+    state::CARRY,
 };
 
 /// Public (crate) entry point: attempt a table-dispatch of `opcode`.
@@ -80,11 +80,11 @@ pub(crate) fn try_table_step<C: CpuRegs>(cpu: &mut C, bus: &mut Bus, opcode: u8)
 
     // Operand fetch / addressing
     let operand_kind = entry.mode;
-    let resolved_value: Option<u8>; // For immediate loads
+    // For immediate loads
     let mut effective_addr: Option<u16> = None;
 
     use AddrMode::*;
-    resolved_value = match operand_kind {
+    let resolved_value: Option<u8> = match operand_kind {
         Implied => None,
         Acc => None,
         Imm => Some(fetch_byte(cpu, bus)),
@@ -317,17 +317,17 @@ static EXEC_TABLE: [OpInfo; 256] = {
 mod tests {
     use super::*;
     use crate::cartridge::Cartridge;
-    use crate::cpu::core::Cpu;
+    use crate::cpu::state::CpuState;
     use crate::test_utils::build_nrom_with_prg;
 
     // Only run when feature enabled.
     #[cfg(feature = "table_dispatch")]
-    fn setup(prg: &[u8]) -> (Cpu, Bus) {
+    fn setup(prg: &[u8]) -> (CpuState, Bus) {
         let rom = build_nrom_with_prg(prg, 1, 1, None);
         let cart = Cartridge::from_ines_bytes(&rom).unwrap();
         let mut bus = Bus::new();
         bus.attach_cartridge(cart);
-        let mut cpu = Cpu::new();
+        let mut cpu = CpuState::new();
         cpu.reset(&mut bus);
         (cpu, bus)
     }
@@ -351,7 +351,8 @@ mod tests {
         // We'll construct a short program and manually set X so second fetch crosses.
         let (mut cpu, mut bus) = setup(&[0xEA, 0xBD, 0xFF, 0x80, 0x00]); // NOP; LDA $80FF,X; BRK
         // Execute NOP via table
-        let _ = try_table_step(&mut cpu, &mut bus, bus.read(cpu.pc())).unwrap();
+        let next_opcode = bus.read(cpu.pc());
+        let _ = try_table_step(&mut cpu, &mut bus, next_opcode).unwrap();
         cpu.set_x(0x01);
         let lda_opcode = bus.read(cpu.pc());
         assert_eq!(lda_opcode, 0xBD);

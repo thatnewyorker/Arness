@@ -1,18 +1,22 @@
 /*!
-integration_helpers: compatibility wrappers and convenience accessors
+integration_helpers: public compatibility wrappers and test ergonomics
 
 Purpose
-- Provide stable, test-friendly accessors around the Bus façade without exposing internal
-  structure. These are especially useful while refactoring internal modules behind `Bus`.
-- Keep external tests and integration points simple and decoupled from internal layouts.
+- Provide stable, test-friendly shims around the Bus façade without exposing internal structure.
+- Keep external tests and examples simple and decoupled from internal layouts.
 
 Scope
-- Pure wrappers that forward to the `Bus` public API (or read-only helpers) with descriptive docs.
-- Zero new behavior — these functions are thin shims over existing `Bus` methods.
+- Thin, readable wrappers that forward to existing Bus APIs (or read-only helpers).
+- No new behavior and no side effects beyond the underlying Bus call.
 
-Notes
-- Prefer calling the `Bus` methods directly in new code; these helpers exist for ergonomic
-  and compatibility reasons (particularly in tests and example code).
+Visibility and usage
+- This module is public for integration/tests convenience.
+- Prefer calling Bus methods directly in new code; use these helpers for clarity or when borrowing ergonomics are awkward.
+- Internal/non-hot-path helpers live in `bus_helpers.rs` and are crate-internal (`pub(in crate::bus)`).
+
+Performance
+- Wrappers are tiny and annotated inline where helpful; they should not be used on hot paths if a direct call is clearer.
+
 */
 
 use crate::apu::Apu;

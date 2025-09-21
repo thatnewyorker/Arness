@@ -32,7 +32,7 @@ Design Notes
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 pub(crate) mod arithmetic;
 pub(crate) mod branches;
 pub(crate) mod compare; // extracted compare (CMP/CPX/CPY) opcode family handler

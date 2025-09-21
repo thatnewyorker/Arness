@@ -8,9 +8,9 @@ Purpose
 - Centralize "who implements what" so the DMA controller (`DmaController`) can operate over
   minimal traits (`CpuMemory`, `OamWriter`) with concrete adapters.
 
-Intended responsibilities (to be implemented in subsequent commits)
-- Move the following trait impls from `bus_impl.rs` into this module:
-  1) `impl crate::bus::dma::CpuMemory for crate::bus::bus_impl::Bus`
+Intended responsibilities
+- Ensure the following trait impls live in this module:
+  1) `impl crate::bus::dma::CpuMemory for crate::bus::Bus`
      - Delegates DMA source reads to the Bus CPU-visible read path.
      - This remains useful as a convenience/compat shim, but orchestrator code should prefer
        the field-borrowing `CpuMemoryView` adapter when possible.
@@ -23,8 +23,8 @@ Intended responsibilities (to be implemented in subsequent commits)
 
 Integration plan (Phase B, step-by-step)
 1. Introduce this module (skeleton) and add `mod dma_glue;` (or `pub mod dma_glue;`) in `bus/mod.rs`.
-2. Move the trait impls listed above from `bus_impl.rs` into this file unchanged (copy/paste):
-   - Add necessary `use` statements for `crate::bus::bus_impl::Bus`, `crate::ppu::Ppu`, and
+2. Ensure the trait impls listed above are implemented in this file:
+   - Add necessary `use` statements for `crate::bus::Bus`, `crate::ppu::Ppu`, and
      `crate::bus::dma::{CpuMemory, OamWriter}`.
 3. Ensure visibility is appropriate:
    - Impl blocks are inherently visible if types are in scope; no need to export anything from here.
@@ -45,7 +45,7 @@ Notes
 #![allow(unused_variables)]
 #![allow(unused_macros)]
 
-impl crate::bus::dma::CpuMemory for crate::bus::bus_impl::Bus {
+impl crate::bus::dma::CpuMemory for crate::bus::Bus {
     #[inline]
     fn cpu_read(&mut self, addr: u16) -> u8 {
         self.read(addr)

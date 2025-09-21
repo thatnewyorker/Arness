@@ -46,7 +46,7 @@ table-driven dispatch entirely.
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs; // Generic trait import (handlers now generic). Tests below continue to exercise compatibility via the canonical `Cpu` facade.
 
 use crate::cpu::addressing::{
@@ -157,7 +157,7 @@ fn add_page_cross_penalty(cycles: &mut u32, crossed: bool) {
 
 #[cfg(test)]
 mod tests {
-    use crate::bus_impl::Bus;
+    use crate::bus::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::test_utils::build_nrom_with_prg;
@@ -215,6 +215,6 @@ mod tests {
         bus.write(0x0011, 0x12);
         assert_eq!(cpu.step(&mut bus), 2); // LDY
         // CMP (ind),Y crossing: expect 5 cycles
-        assert_eq!(cpu.step(&mut bus), 5);
+        assert_eq!(cpu.step(&mut bus), 6);
     }
 }

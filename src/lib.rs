@@ -28,7 +28,7 @@ pub mod ppu;
 pub mod ppu_bus;
 
 // Re-export commonly used types at the crate root for convenience.
-pub use crate::bus as bus_impl;
+
 pub use bus::Bus;
 pub use cartridge::Cartridge;
 pub use cpu::core::Cpu;

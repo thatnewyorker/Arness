@@ -51,10 +51,8 @@ pub fn cpu_read(bus: &mut Bus, addr: u16) -> u8 {
             } else if addr == 0x4014 {
                 // OAM DMA register read not meaningful; return 0
                 0
-            } else if let Some(v) = ControllerRegisters::read(bus, addr) {
-                v
             } else {
-                0
+                ControllerRegisters::read(bus, addr).unwrap_or_default()
             }
         }
         0x4018..=0x401F => 0,

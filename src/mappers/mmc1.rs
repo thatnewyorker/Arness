@@ -48,7 +48,7 @@ pub struct Mmc1 {
 
 impl Mmc1 {
     pub fn new(prg_rom: Vec<u8>, prg_ram: Vec<u8>, chr: Vec<u8>, chr_is_ram: bool) -> Self {
-        let prg_16k_bank_count = max(1, (prg_rom.len() / 0x4000) as usize) as u8;
+        let prg_16k_bank_count = max(1, prg_rom.len() / 0x4000) as u8;
         let chr_len = if chr.is_empty() { 8 * 1024 } else { chr.len() };
         let mut chr_buf = chr;
         if chr_buf.is_empty() {
@@ -201,20 +201,19 @@ impl Mmc1 {
                 if self.chr_mode() == 0 {
                     let bank8k = (self.chr_bank0 & (self.chr_4k_bank_count.saturating_sub(1))) & !1;
                     let base = bank8k as usize * 0x1000;
-                    let ofs = (addr as usize) & 0x1FFF;
+                    // In 8 KiB CHR mode, mirror the selected 4 KiB bank across both halves.
+                    let ofs = (addr as usize) & 0x0FFF;
+                    self.chr[(base + ofs) % self.chr.len()]
+                } else if addr < 0x1000 {
+                    let b = self.chr_bank0 % self.chr_4k_bank_count.max(1);
+                    let base = b as usize * 0x1000;
+                    let ofs = (addr as usize) & 0x0FFF;
                     self.chr[(base + ofs) % self.chr.len()]
                 } else {
-                    if addr < 0x1000 {
-                        let b = self.chr_bank0 % self.chr_4k_bank_count.max(1);
-                        let base = b as usize * 0x1000;
-                        let ofs = (addr as usize) & 0x0FFF;
-                        self.chr[(base + ofs) % self.chr.len()]
-                    } else {
-                        let b = self.chr_bank1 % self.chr_4k_bank_count.max(1);
-                        let base = b as usize * 0x1000;
-                        let ofs = (addr as usize - 0x1000) & 0x0FFF;
-                        self.chr[(base + ofs) % self.chr.len()]
-                    }
+                    let b = self.chr_bank1 % self.chr_4k_bank_count.max(1);
+                    let base = b as usize * 0x1000;
+                    let ofs = (addr as usize - 0x1000) & 0x0FFF;
+                    self.chr[(base + ofs) % self.chr.len()]
                 }
             }
             _ => 0,
@@ -231,23 +230,22 @@ impl Mmc1 {
         if self.chr_mode() == 0 {
             let bank8k = (self.chr_bank0 & (self.chr_4k_bank_count.saturating_sub(1))) & !1;
             let base = bank8k as usize * 0x1000;
-            let ofs = (addr as usize) & 0x1FFF;
+            // In 8 KiB CHR mode, mirror the selected 4 KiB bank across both halves.
+            let ofs = (addr as usize) & 0x0FFF;
+            let idx = (base + ofs) % self.chr.len();
+            self.chr[idx] = value;
+        } else if addr < 0x1000 {
+            let b = self.chr_bank0 % self.chr_4k_bank_count.max(1);
+            let base = b as usize * 0x1000;
+            let ofs = (addr as usize) & 0x0FFF;
             let idx = (base + ofs) % self.chr.len();
             self.chr[idx] = value;
         } else {
-            if addr < 0x1000 {
-                let b = self.chr_bank0 % self.chr_4k_bank_count.max(1);
-                let base = b as usize * 0x1000;
-                let ofs = (addr as usize) & 0x0FFF;
-                let idx = (base + ofs) % self.chr.len();
-                self.chr[idx] = value;
-            } else {
-                let b = self.chr_bank1 % self.chr_4k_bank_count.max(1);
-                let base = b as usize * 0x1000;
-                let ofs = (addr as usize - 0x1000) & 0x0FFF;
-                let idx = (base + ofs) % self.chr.len();
-                self.chr[idx] = value;
-            }
+            let b = self.chr_bank1 % self.chr_4k_bank_count.max(1);
+            let base = b as usize * 0x1000;
+            let ofs = (addr as usize - 0x1000) & 0x0FFF;
+            let idx = (base + ofs) % self.chr.len();
+            self.chr[idx] = value;
         }
     }
 

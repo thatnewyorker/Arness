@@ -11,15 +11,15 @@ Scope:
 
 Status semantics (stubbed):
 - Reading $4015 returns:
-    bit 0: Square 1 active (stubbed as "enabled" from last write to $4015)
-    bit 1: Square 2 active (stubbed as "enabled" from last write to $4015)
-    bit 2: Triangle active (stubbed as "enabled" from last write to $4015)
-    bit 3: Noise active (stubbed as "enabled" from last write to $4015)
-    bit 4: DMC active (stubbed as "enabled" from last write to $4015)
-    bit 5: unused (0)
-    bit 6: Frame interrupt flag (frame IRQ)
-    bit 7: DMC interrupt flag
-  Reading $4015 clears the frame interrupt flag (bit 6), as on real hardware.
+  - bit 0: Square 1 active (stubbed as "enabled" from last write to $4015)
+  - bit 1: Square 2 active (stubbed as "enabled" from last write to $4015)
+  - bit 2: Triangle active (stubbed as "enabled" from last write to $4015)
+  - bit 3: Noise active (stubbed as "enabled" from last write to $4015)
+  - bit 4: DMC active (stubbed as "enabled" from last write to $4015)
+  - bit 5: unused (0)
+  - bit 6: Frame interrupt flag (frame IRQ)
+  - bit 7: DMC interrupt flag
+- Reading $4015 clears the frame interrupt flag (bit 6), as on real hardware.
 
 Write semantics:
 - $4015 write (APUSTATUS):

@@ -21,9 +21,9 @@ This file intentionally avoids dependencies on other modules to keep the trait m
 /// - Implementations decide mapping/banking and handle out-of-range accesses reasonably.
 /// - `reset()` allows mapper-specific state to be reinitialized on power/reset.
 /// - `irq_pending()` returns whether the mapper asserts an IRQ line (used by Bus/CPU).
-/// Dynamic mirroring modes a mapper may produce at runtime. When a mapper
-/// returns `Some(MapperMirroring)` from `current_mirroring`, it overrides the
-/// static cartridge header mirroring (except in four‑screen cases).
+///   Dynamic mirroring modes a mapper may produce at runtime. When a mapper
+///   returns `Some(MapperMirroring)` from `current_mirroring`, it overrides the
+///   static cartridge header mirroring (except in four‑screen cases).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MapperMirroring {
     SingleScreenLower,

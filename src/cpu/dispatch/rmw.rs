@@ -60,7 +60,7 @@ fully supplanted for commonly executed opcodes.
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs;
 
 use crate::cpu::addressing::{addr_abs, addr_abs_x, addr_zp, addr_zp_x};
@@ -204,7 +204,7 @@ pub(super) fn handle<C: CpuRegs>(
 
 #[cfg(test)]
 mod tests {
-    use crate::bus_impl::Bus;
+    use crate::bus::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::cpu::cycles::base_cycles;

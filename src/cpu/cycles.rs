@@ -4,14 +4,8 @@ cycles.rs - Cycle timing helpers for the 6502 CPU core.
 Purpose
 =======
 Provides:
-  - `base_cycles(op)`  : The baseline cycle count for a single opcode
-                         (not including conditional page‑cross or branch
-                         penalties, nor +1 for taken branches or
-                         penalties added dynamically in dispatch).
-  - `is_rmw(op)`       : Identifies opcodes that perform a
-                         Read‑Modify‑Write bus choreography so the
-                         dispatcher can adjust how many cycles are
-                         "ticked" vs. "returned".
+- `base_cycles(op)`: The baseline cycle count for a single opcode (not including conditional page‑cross or branch penalties, nor +1 for taken branches or penalties added dynamically in dispatch).
+- `is_rmw(op)`: Identifies opcodes that perform a Read‑Modify‑Write bus choreography so the dispatcher can adjust how many cycles are "ticked" vs. "returned".
 
 Scope
 =====

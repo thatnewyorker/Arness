@@ -32,7 +32,7 @@ false otherwise so the dispatcher can continue down the chain.
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs; // generic trait for arithmetic handler
 
 use crate::cpu::addressing::{
@@ -149,7 +149,7 @@ fn add_page_cross_penalty(cycles: &mut u32, crossed: bool) {
 
 #[cfg(test)]
 mod tests {
-    use crate::bus_impl::Bus;
+    use crate::bus::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::test_utils::build_nrom_with_prg;
@@ -181,7 +181,7 @@ mod tests {
         bus.write(0x0011, 0x12);
         assert_eq!(cpu.step(&mut bus), 2); // LDY
         let cycles = cpu.step(&mut bus);
-        assert_eq!(cycles, 5); // SBC (ind),Y with page cross
+        assert_eq!(cycles, 6); // SBC (ind),Y with page cross
     }
 
     #[test]
@@ -195,9 +195,10 @@ mod tests {
 
     #[test]
     fn sbc_immediate_basic() {
-        // LDA #$05; SBC #$02; BRK  => A = 0x03
-        let (mut cpu, mut bus) = setup(&[0xA9, 0x05, 0xE9, 0x02, 0x00]);
+        // LDA #$05; SEC; SBC #$02; BRK  => A = 0x03
+        let (mut cpu, mut bus) = setup(&[0xA9, 0x05, 0x38, 0xE9, 0x02, 0x00]);
         let _ = cpu.step(&mut bus); // LDA
+        let _ = cpu.step(&mut bus); // SEC
         let _ = cpu.step(&mut bus); // SBC
         assert_eq!(cpu.a(), 0x03);
     }

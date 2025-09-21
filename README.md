@@ -26,7 +26,7 @@ Not yet implemented
 - src/
   - apu.rs — APU register/status stub + frame IRQ approximation
   - bus/ — Bus façade and modular submodules
-    - bus_impl.rs — Bus struct, timing glue, and device integration
+    - mod.rs — Bus façade with inlined Bus implementation and submodule declarations
     - cpu_interface.rs — CPU-visible address dispatcher and helpers
     - ppu_registers.rs — CPU-visible PPU register window (0x2000–0x3FFF)
     - ppu_space.rs — PPU address-space mapping (nametables, palette, mirroring)
@@ -89,7 +89,7 @@ Unit tests cover CPU cycle counts, bus behavior (mirroring, DMA, registers), PPU
   - Removed mem::replace usage in timing/orchestrator paths (PPU stepping and DMA micro-steps) in favor of non-overlapping borrows.
 - Deprecation: BusPpuView::new(&Bus) is deprecated in favor of BusPpuView::from_parts(...) to avoid whole-Bus immutable borrows in orchestrator code.
 - API surface: BusPpuView and CpuMemoryView are internal to the bus module; downstream consumers should use the Bus façade and PpuBus trait where needed.
-- Reorg: Extracted PPU mapping helpers to bus/ppu_memory.rs, moved DMA glue impls to bus/dma_glue.rs, and added bus/ram_helpers.rs; Bus methods delegate to these helpers to reduce bus_impl.rs size while preserving behavior.
+- Reorg: Extracted PPU mapping helpers to bus/ppu_memory.rs, moved DMA glue impls to bus/dma_glue.rs, and added bus/ram_helpers.rs; Bus methods delegate to these helpers to keep the Bus façade (in bus/mod.rs) focused while preserving behavior.
 - Tests: Added unit tests covering DMA alignment behavior (513/514 cycles), read/write alternation, RAM mirroring via CpuMemoryView, and end-to-end OAM DMA correctness.
 
 ## Library usage

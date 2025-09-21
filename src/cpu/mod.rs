@@ -4,12 +4,14 @@ cpu::mod - Public façade for the 6502 CPU core.
 This module reorganizes the previous monolithic `cpu6502.rs` into a
 multi-file structure:
 
-    state.rs        - Core CPU state (registers, flags) + constructors.
-    addressing.rs   - Addressing mode enum & operand resolution helpers.
-    execute.rs      - Instruction semantic helpers (ALU, stack, RMW, branch).
-    decode_legacy.rs- Legacy giant match-based dispatcher (temporary).
-    table.rs        - Feature-gated table-driven metadata & dispatch.
-    dispatch.rs     - Orchestrates a single CPU step (DMA/IRQ/NMI + dispatch).
+```text
+state.rs        - Core CPU state (registers, flags) + constructors.
+addressing.rs   - Addressing mode enum & operand resolution helpers.
+execute.rs      - Instruction semantic helpers (ALU, stack, RMW, branch).
+decode_legacy.rs- Legacy giant match-based dispatcher (temporary).
+table.rs        - Feature-gated table-driven metadata & dispatch.
+dispatch.rs     - Orchestrates a single CPU step (DMA/IRQ/NMI + dispatch).
+```
 
 The public surface is exposed via the `Cpu` facade (wrapping `CpuState`).
 Downstream code should not rely on internal module layout; internal organization
@@ -28,12 +30,14 @@ Migration status:
   helpers in the dispatch / execute modules.
 
 Usage:
-```rust
+```rust,no_run
 use arness::cpu::core::Cpu;
+use arness::bus::Bus;
 
+let mut bus = Bus::new();
 let mut cpu = Cpu::new();
 cpu.reset(&mut bus);
-cpu.step(&mut bus);
+let _cycles = cpu.step(&mut bus);
 ```
 
 NOTE: The facade offers stable stepping (`step`, `run`) while internal modules

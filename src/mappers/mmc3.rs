@@ -256,28 +256,28 @@ impl Mmc3 {
         }
         self.prev_a12_high.set(a12_high);
         // Map address according to inversion and bank registers
-        let physical_index = if self.chr_inversion == 0 {
+        let physical_index: usize = if self.chr_inversion == 0 {
             // Normal arrangement
             match addr {
                 0x0000..=0x07FF => {
-                    let bank2k = (self.bank_regs[0] & 0xFE) as u16;
-                    bank2k * 0x400 + (addr as u16 & 0x07FF)
+                    let bank2k = (self.bank_regs[0] & 0xFE) as usize;
+                    bank2k * 0x400 + (addr as usize & 0x07FF)
                 }
                 0x0800..=0x0FFF => {
-                    let bank2k = (self.bank_regs[1] & 0xFE) as u16;
-                    bank2k * 0x400 + ((addr as u16 - 0x0800) & 0x07FF)
+                    let bank2k = (self.bank_regs[1] & 0xFE) as usize;
+                    bank2k * 0x400 + ((addr as usize - 0x0800) & 0x07FF)
                 }
                 0x1000..=0x13FF => {
-                    self.bank_regs[2] as u16 * 0x400 + ((addr as u16 - 0x1000) & 0x03FF)
+                    (self.bank_regs[2] as usize) * 0x400 + ((addr as usize - 0x1000) & 0x03FF)
                 }
                 0x1400..=0x17FF => {
-                    self.bank_regs[3] as u16 * 0x400 + ((addr as u16 - 0x1400) & 0x03FF)
+                    (self.bank_regs[3] as usize) * 0x400 + ((addr as usize - 0x1400) & 0x03FF)
                 }
                 0x1800..=0x1BFF => {
-                    self.bank_regs[4] as u16 * 0x400 + ((addr as u16 - 0x1800) & 0x03FF)
+                    (self.bank_regs[4] as usize) * 0x400 + ((addr as usize - 0x1800) & 0x03FF)
                 }
                 0x1C00..=0x1FFF => {
-                    self.bank_regs[5] as u16 * 0x400 + ((addr as u16 - 0x1C00) & 0x03FF)
+                    (self.bank_regs[5] as usize) * 0x400 + ((addr as usize - 0x1C00) & 0x03FF)
                 }
                 _ => 0,
             }
@@ -285,28 +285,28 @@ impl Mmc3 {
             // Inverted arrangement
             match addr {
                 0x1000..=0x17FF => {
-                    let bank2k = (self.bank_regs[0] & 0xFE) as u16;
-                    bank2k * 0x400 + ((addr as u16 - 0x1000) & 0x07FF)
+                    let bank2k = (self.bank_regs[0] & 0xFE) as usize;
+                    bank2k * 0x400 + ((addr as usize - 0x1000) & 0x07FF)
                 }
                 0x1800..=0x1FFF => {
-                    let bank2k = (self.bank_regs[1] & 0xFE) as u16;
-                    bank2k * 0x400 + ((addr as u16 - 0x1800) & 0x07FF)
+                    let bank2k = (self.bank_regs[1] & 0xFE) as usize;
+                    bank2k * 0x400 + ((addr as usize - 0x1800) & 0x07FF)
                 }
-                0x0000..=0x03FF => self.bank_regs[2] as u16 * 0x400 + (addr as u16 & 0x03FF),
+                0x0000..=0x03FF => (self.bank_regs[2] as usize) * 0x400 + (addr as usize & 0x03FF),
                 0x0400..=0x07FF => {
-                    self.bank_regs[3] as u16 * 0x400 + ((addr as u16 - 0x0400) & 0x03FF)
+                    (self.bank_regs[3] as usize) * 0x400 + ((addr as usize - 0x0400) & 0x03FF)
                 }
                 0x0800..=0x0BFF => {
-                    self.bank_regs[4] as u16 * 0x400 + ((addr as u16 - 0x0800) & 0x03FF)
+                    (self.bank_regs[4] as usize) * 0x400 + ((addr as usize - 0x0800) & 0x03FF)
                 }
                 0x0C00..=0x0FFF => {
-                    self.bank_regs[5] as u16 * 0x400 + ((addr as u16 - 0x0C00) & 0x03FF)
+                    (self.bank_regs[5] as usize) * 0x400 + ((addr as usize - 0x0C00) & 0x03FF)
                 }
                 _ => 0,
             }
         };
-        let max_chr_index = (self.chr_1k_count * 0x400) as usize;
-        let idx = (physical_index as usize) % max_chr_index;
+        let max_chr_index = (self.chr_1k_count as usize) * 0x400;
+        let idx = physical_index % max_chr_index;
         self.chr[idx]
     }
 
@@ -319,55 +319,57 @@ impl Mmc3 {
         // (Simplification: re-run mapping; acceptable performance for tests)
         if self.chr_is_ram {
             // replicate mapping quickly
-            let physical_index = if self.chr_inversion == 0 {
+            let physical_index: usize = if self.chr_inversion == 0 {
                 match addr {
                     0x0000..=0x07FF => {
-                        let bank2k = (self.bank_regs[0] & 0xFE) as u16;
-                        bank2k * 0x400 + (addr as u16 & 0x07FF)
+                        let bank2k = (self.bank_regs[0] & 0xFE) as usize;
+                        bank2k * 0x400 + (addr as usize & 0x07FF)
                     }
                     0x0800..=0x0FFF => {
-                        let bank2k = (self.bank_regs[1] & 0xFE) as u16;
-                        bank2k * 0x400 + ((addr as u16 - 0x0800) & 0x07FF)
+                        let bank2k = (self.bank_regs[1] & 0xFE) as usize;
+                        bank2k * 0x400 + ((addr as usize - 0x0800) & 0x07FF)
                     }
                     0x1000..=0x13FF => {
-                        self.bank_regs[2] as u16 * 0x400 + ((addr as u16 - 0x1000) & 0x03FF)
+                        (self.bank_regs[2] as usize) * 0x400 + ((addr as usize - 0x1000) & 0x03FF)
                     }
                     0x1400..=0x17FF => {
-                        self.bank_regs[3] as u16 * 0x400 + ((addr as u16 - 0x1400) & 0x03FF)
+                        (self.bank_regs[3] as usize) * 0x400 + ((addr as usize - 0x1400) & 0x03FF)
                     }
                     0x1800..=0x1BFF => {
-                        self.bank_regs[4] as u16 * 0x400 + ((addr as u16 - 0x1800) & 0x03FF)
+                        (self.bank_regs[4] as usize) * 0x400 + ((addr as usize - 0x1800) & 0x03FF)
                     }
                     0x1C00..=0x1FFF => {
-                        self.bank_regs[5] as u16 * 0x400 + ((addr as u16 - 0x1C00) & 0x03FF)
+                        (self.bank_regs[5] as usize) * 0x400 + ((addr as usize - 0x1C00) & 0x03FF)
                     }
                     _ => 0,
                 }
             } else {
                 match addr {
                     0x1000..=0x17FF => {
-                        let bank2k = (self.bank_regs[0] & 0xFE) as u16;
-                        bank2k * 0x400 + ((addr as u16 - 0x1000) & 0x07FF)
+                        let bank2k = (self.bank_regs[0] & 0xFE) as usize;
+                        bank2k * 0x400 + ((addr as usize - 0x1000) & 0x07FF)
                     }
                     0x1800..=0x1FFF => {
-                        let bank2k = (self.bank_regs[1] & 0xFE) as u16;
-                        bank2k * 0x400 + ((addr as u16 - 0x1800) & 0x07FF)
+                        let bank2k = (self.bank_regs[1] & 0xFE) as usize;
+                        bank2k * 0x400 + ((addr as usize - 0x1800) & 0x07FF)
                     }
-                    0x0000..=0x03FF => self.bank_regs[2] as u16 * 0x400 + (addr as u16 & 0x03FF),
+                    0x0000..=0x03FF => {
+                        (self.bank_regs[2] as usize) * 0x400 + (addr as usize & 0x03FF)
+                    }
                     0x0400..=0x07FF => {
-                        self.bank_regs[3] as u16 * 0x400 + ((addr as u16 - 0x0400) & 0x03FF)
+                        (self.bank_regs[3] as usize) * 0x400 + ((addr as usize - 0x0400) & 0x03FF)
                     }
                     0x0800..=0x0BFF => {
-                        self.bank_regs[4] as u16 * 0x400 + ((addr as u16 - 0x0800) & 0x03FF)
+                        (self.bank_regs[4] as usize) * 0x400 + ((addr as usize - 0x0800) & 0x03FF)
                     }
                     0x0C00..=0x0FFF => {
-                        self.bank_regs[5] as u16 * 0x400 + ((addr as u16 - 0x0C00) & 0x03FF)
+                        (self.bank_regs[5] as usize) * 0x400 + ((addr as usize - 0x0C00) & 0x03FF)
                     }
                     _ => 0,
                 }
             };
-            let max_chr_index = (self.chr_1k_count * 0x400) as usize;
-            let idx = (physical_index as usize) % max_chr_index;
+            let max_chr_index = (self.chr_1k_count as usize) * 0x400;
+            let idx = physical_index % max_chr_index;
             // Only write if index within range (it is) – perform write
             if idx < self.chr.len() {
                 self.chr[idx] = value;
@@ -385,9 +387,7 @@ impl Mapper for Mmc3 {
     fn cpu_read(&mut self, addr: u16) -> u8 {
         match addr {
             0x6000..=0x7FFF => {
-                if self.prg_ram.is_empty() {
-                    0
-                } else if !self.prg_ram_enabled {
+                if self.prg_ram.is_empty() || !self.prg_ram_enabled {
                     0
                 } else {
                     let rel = (addr as usize - 0x6000) % self.prg_ram.len();

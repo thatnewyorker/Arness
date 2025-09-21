@@ -47,7 +47,7 @@ Return Contract
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs;
 
 use crate::cpu::addressing::{addr_abs, read_word_indirect_bug};
@@ -135,8 +135,7 @@ pub(super) fn handle<C: CpuRegs>(opcode: u8, cpu: &mut C, bus: &mut Bus, cycles:
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::bus_impl::Bus;
+    use crate::bus::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::cpu::cycles::base_cycles;
@@ -185,8 +184,14 @@ mod tests {
     fn rti_restores_pc_and_status() {
         let (mut cpu, mut bus) = setup(&[0x40, 0x00]);
         let return_pc = cpu.pc();
-        push_word(cpu.state_mut(), &mut bus, return_pc);
-        bus.write(0x0100u16 | cpu.sp() as u16, cpu.status());
+        let sp = cpu.sp();
+        let pcl = (return_pc & 0x00FF) as u8;
+        let pch = (return_pc >> 8) as u8;
+        // RTI pops P, then PCL, then PCH. Arrange stack as:
+        // [SP+1] = P (status), [SP+2] = PCL, [SP+3] = PCH
+        bus.write(0x0100u16 | sp.wrapping_add(1) as u16, cpu.status());
+        bus.write(0x0100u16 | sp.wrapping_add(2) as u16, pcl);
+        bus.write(0x0100u16 | sp.wrapping_add(3) as u16, pch);
         let cycles = cpu.step(&mut bus);
         assert_eq!(cycles, base_cycles(0x40));
         assert_eq!(cpu.pc(), return_pc);

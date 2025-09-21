@@ -32,7 +32,7 @@ Notes
 #![allow(unused_macros)]
 
 #[inline]
-pub(in crate::bus) fn ppu_mem_read(bus: &crate::bus::bus_impl::Bus, addr: u16) -> u8 {
+pub(in crate::bus) fn ppu_mem_read(bus: &crate::bus::Bus, addr: u16) -> u8 {
     let a = addr & 0x3FFF;
     match a {
         0x0000..=0x1FFF => {
@@ -89,7 +89,7 @@ pub(in crate::bus) fn ppu_mem_read(bus: &crate::bus::bus_impl::Bus, addr: u16) -
 }
 
 #[inline]
-pub(in crate::bus) fn ppu_mem_write(bus: &mut crate::bus::bus_impl::Bus, addr: u16, value: u8) {
+pub(in crate::bus) fn ppu_mem_write(bus: &mut crate::bus::Bus, addr: u16, value: u8) {
     let a = addr & 0x3FFF;
     match a {
         0x0000..=0x1FFF => {

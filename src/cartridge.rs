@@ -224,13 +224,29 @@ impl Cartridge {
     }
 
     /// Read a byte from PRG RAM space ($6000..=$7FFF) via the mapper.
+    /// Normalizes any input address to wrap within the PRG RAM window.
     pub fn cpu_read_prg_ram(&self, addr: u16) -> u8 {
-        self.mapper.borrow_mut().cpu_read(addr)
+        if self.prg_ram_len == 0 {
+            return 0;
+        }
+        let base = 0x6000u16;
+        let rel = (addr as usize).saturating_sub(base as usize);
+        let idx = rel % self.prg_ram_len;
+        let eff = base.wrapping_add(idx as u16);
+        self.mapper.borrow_mut().cpu_read(eff)
     }
 
     /// Write a byte to PRG RAM space ($6000..=$7FFF) via the mapper.
+    /// Normalizes any input address to wrap within the PRG RAM window.
     pub fn cpu_write_prg_ram(&mut self, addr: u16, value: u8) {
-        self.mapper.get_mut().cpu_write(addr, value);
+        if self.prg_ram_len == 0 {
+            return;
+        }
+        let base = 0x6000u16;
+        let rel = (addr as usize).saturating_sub(base as usize);
+        let idx = rel % self.prg_ram_len;
+        let eff = base.wrapping_add(idx as u16);
+        self.mapper.get_mut().cpu_write(eff, value);
     }
 
     // -------------- Accessors --------------
@@ -314,8 +330,8 @@ mod tests {
     fn trainer_moves_data_offset() {
         // Include a trainer and ensure parsing doesn't panic (we don't store trainer).
         let mut trainer = [0u8; 512];
-        for i in 0..512 {
-            trainer[i] = (i & 0xFF) as u8;
+        for (i, b) in trainer.iter_mut().enumerate() {
+            *b = (i & 0xFF) as u8;
         }
         let flags6 = 0b0000_0100; // trainer present
         let flags7 = 0u8;

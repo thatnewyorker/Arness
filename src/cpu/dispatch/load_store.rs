@@ -20,12 +20,7 @@ Stores (no flags changed, no page-cross cycle penalties):
 
 Integration
 ====================
-This module provides a single `handle` function invoked early by the fallback
-dispatcher (`dispatch::fallback::step`) after base cycle lookup:
-
-    if load_store::handle(opcode, cpu, bus, &mut cycles) {
-        // caller finalizes (RMW adjust if applicable + single bus tick)
-    }
+This module provides a single `handle` function invoked early by the fallback dispatcher (`dispatch::fallback::step`) after base cycle lookup.
 
 The fallback dispatcher should not also carry duplicate match arms for these opcodes.
 
@@ -46,7 +41,7 @@ Potential improvements:
 
 #![allow(dead_code)]
 
-use crate::bus_impl::Bus;
+use crate::bus::Bus;
 use crate::cpu::regs::CpuRegs;
 
 use crate::cpu::addressing::{
@@ -240,7 +235,7 @@ fn add_page_cross_penalty(cycles: &mut u32, crossed: bool) {
 #[cfg(test)]
 mod tests {
 
-    use crate::bus_impl::Bus;
+    use crate::bus::Bus;
     use crate::cartridge::Cartridge;
     use crate::cpu::core::Cpu;
     use crate::test_utils::build_nrom_with_prg;
