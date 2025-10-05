@@ -176,8 +176,8 @@ mod tests {
     fn cmp_immediate_basic_flags() {
         // LDA #$10; CMP #$10 -> Z=1, C=1
         let (mut cpu, mut bus) = setup(&[0xA9, 0x10, 0xC9, 0x10, 0x00]);
-        let _ = cpu.step(&mut bus); // LDA
-        let _ = cpu.step(&mut bus); // CMP
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // LDA
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // CMP
         // Flags indirectly validated by lack of panic; deeper flag checks can be added in broader test suite.
     }
 
@@ -185,25 +185,25 @@ mod tests {
     fn cpx_immediate() {
         // LDX #$05; CPX #$02
         let (mut cpu, mut bus) = setup(&[0xA2, 0x05, 0xE0, 0x02, 0x00]);
-        let _ = cpu.step(&mut bus); // LDX
-        let _ = cpu.step(&mut bus); // CPX
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // LDX
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // CPX
     }
 
     #[test]
     fn cpy_immediate() {
         // LDY #$07; CPY #$09
         let (mut cpu, mut bus) = setup(&[0xA0, 0x07, 0xC0, 0x09, 0x00]);
-        let _ = cpu.step(&mut bus); // LDY
-        let _ = cpu.step(&mut bus); // CPY
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // LDY
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // CPY
     }
 
     #[test]
     fn cmp_abs_x_page_cross_penalty() {
         // LDX #$01; CMP $12FF,X; BRK  (address crosses page -> +1 cycle)
         let (mut cpu, mut bus) = setup(&[0xA2, 0x01, 0xDD, 0xFF, 0x12, 0x00]);
-        assert_eq!(cpu.step(&mut bus), 2); // LDX
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDX
         // CMP abs,X with page cross: expect base (4) + 1 = 5
-        assert_eq!(cpu.step(&mut bus), 5);
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 5);
     }
 
     #[test]
@@ -213,8 +213,8 @@ mod tests {
         // Prime zero-page pointer $10 -> $12FF
         bus.write(0x0010, 0xFF);
         bus.write(0x0011, 0x12);
-        assert_eq!(cpu.step(&mut bus), 2); // LDY
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDY
         // CMP (ind),Y crossing: expect 5 cycles
-        assert_eq!(cpu.step(&mut bus), 6);
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 6);
     }
 }

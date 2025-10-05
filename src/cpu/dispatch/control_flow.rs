@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn jmp_abs_sets_pc() {
         let (mut cpu, mut bus) = setup(&[0x4C, 0x05, 0x80, 0xEA, 0x00]);
-        let c = cpu.step(&mut bus);
+        let c = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c, base_cycles(0x4C));
         assert!(!cpu.is_halted());
     }
@@ -162,11 +162,11 @@ mod tests {
     #[test]
     fn jsr_then_rts_round_trip() {
         let (mut cpu, mut bus) = setup(&[0x20, 0x05, 0x80, 0xEA, 0x00, 0x60, 0x00]);
-        let c_jsr = cpu.step(&mut bus);
+        let c_jsr = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c_jsr, base_cycles(0x20));
-        let c_rts = cpu.step(&mut bus);
+        let c_rts = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c_rts, base_cycles(0x60));
-        let c_next = cpu.step(&mut bus);
+        let c_next = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert!(c_next > 0);
     }
 
@@ -174,7 +174,7 @@ mod tests {
     fn brk_pushes_and_halts() {
         let (mut cpu, mut bus) = setup(&[0x00]);
         let sp_before = cpu.sp();
-        let cycles = cpu.step(&mut bus);
+        let cycles = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(cycles, 7);
         assert_eq!(cpu.sp(), sp_before.wrapping_sub(3));
         assert!(cpu.is_halted());
@@ -192,7 +192,7 @@ mod tests {
         bus.write(0x0100u16 | sp.wrapping_add(1) as u16, cpu.status());
         bus.write(0x0100u16 | sp.wrapping_add(2) as u16, pcl);
         bus.write(0x0100u16 | sp.wrapping_add(3) as u16, pch);
-        let cycles = cpu.step(&mut bus);
+        let cycles = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(cycles, base_cycles(0x40));
         assert_eq!(cpu.pc(), return_pc);
     }
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn jmp_indirect_bug_behavior_smoke() {
         let (mut cpu, mut bus) = setup(&[0x6C, 0x00, 0x80, 0x00]);
-        let c = cpu.step(&mut bus);
+        let c = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c, base_cycles(0x6C));
     }
 }

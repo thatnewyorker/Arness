@@ -135,10 +135,10 @@ mod tests {
         // Program: LDX #$01; LDA $12FF,X; BRK
         let (mut cpu, mut bus) = setup(&[0xA2, 0x01, 0xBD, 0xFF, 0x12, 0x00]);
         // LDX
-        let c1 = cpu.step(&mut bus);
+        let c1 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c1, 2);
         // LDA abs,X page cross
-        let c2 = cpu.step(&mut bus);
+        let c2 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c2, 5);
     }
 
@@ -154,9 +154,9 @@ mod tests {
         prg.push(0x00); // BRK
         let (mut cpu, mut bus) = setup(&prg);
         for _ in 0..0x00FC {
-            assert_eq!(cpu.step(&mut bus), 2);
+            assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2);
         }
-        assert_eq!(cpu.step(&mut bus), 2); // CLC
-        assert_eq!(cpu.step(&mut bus), 4); // BCC taken + page cross
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // CLC
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 4); // BCC taken + page cross
     }
 }

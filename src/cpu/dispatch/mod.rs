@@ -133,7 +133,7 @@ mod tests {
     fn nmi_preempts_opcode() {
         let (mut cpu, mut bus) = setup(&[0xEA, 0x00]); // NOP; BRK
         bus.nmi_pending = true;
-        let cycles = cpu.step(&mut bus);
+        let cycles = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(cycles, 7);
     }
 
@@ -141,7 +141,7 @@ mod tests {
     fn fallback_step_executes_nop() {
         let (mut cpu, mut bus) = setup(&[0xEA, 0x00]); // NOP; BRK
         let pc_before = cpu.pc();
-        let cycles = cpu.step(&mut bus);
+        let cycles = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert!(cycles >= 2); // NOP is 2 cycles (table or fallback)
         assert!(cpu.pc() > pc_before);
     }
@@ -151,7 +151,7 @@ mod tests {
         let (mut cpu, mut bus) = setup(&[0xEA, 0x00]);
         // Assert IRQ line but leave I flag set from reset (IRQ ignored)
         bus.irq_line = true;
-        let c1 = cpu.step(&mut bus); // Should just execute NOP
+        let c1 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // Should just execute NOP
         assert!(c1 >= 2);
     }
 }

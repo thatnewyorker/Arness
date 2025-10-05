@@ -162,11 +162,10 @@ impl Cpu {
     // ---------------------------------------------------------------------
     // Bridged step (temporary)
     // ---------------------------------------------------------------------
-    /// Execute one instruction using the generic dispatcher (bridge removed).
-    ///
-    /// Now that all dispatch and execute paths operate on `CpuState` via the
-    /// `CpuRegs` trait, this method delegates directly to the generic
-    /// dispatcher operating on `CpuState`.
+
+    /// Execute one instruction using the generic dispatcher.
+    /// This thin wrapper exists for external consumers that cannot access
+    /// crate-visible dispatch functions directly.
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
         crate::cpu::dispatch::step(&mut self.state, bus)
     }
@@ -216,10 +215,10 @@ mod tests {
     }
 
     #[test]
-    fn bridge_step_executes_nop() {
+    fn dispatch_step_executes_nop() {
         let (mut cpu, mut bus) = setup();
         let pc_before = cpu.pc();
-        let cycles = cpu.step(&mut bus);
+        let cycles = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert!(cycles >= 2);
         assert!(cpu.pc() > pc_before);
     }

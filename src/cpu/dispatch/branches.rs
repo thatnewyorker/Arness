@@ -87,7 +87,7 @@ mod tests {
         // BCS (carry set?) but carry is clear after reset, so not taken.
         // Program: BCS +0x02; NOP; BRK
         let (mut cpu, mut bus) = setup(&[0xB0, 0x02, 0xEA, 0x00]);
-        let c = cpu.step(&mut bus);
+        let c = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c, 2); // not taken => base cycles
     }
 
@@ -96,7 +96,7 @@ mod tests {
         // BCC (carry clear) small forward offset that does not cross boundary
         // Program: BCC +0x02; NOP (skipped if taken target points after); BRK
         let (mut cpu, mut bus) = setup(&[0x90, 0x02, 0xEA, 0x00]);
-        let c = cpu.step(&mut bus);
+        let c = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c, 3); // taken, no cross => base (2) + 1
     }
 
@@ -113,20 +113,20 @@ mod tests {
         let (mut cpu, mut bus) = setup(&prg);
         // Consume the padding NOPs
         for _ in 0..0x00FD {
-            assert_eq!(cpu.step(&mut bus), 2);
+            assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2);
         }
         // Branch: taken + page cross => 4 cycles
-        assert_eq!(cpu.step(&mut bus), 4);
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 4);
     }
 
     #[test]
     fn branch_taken_sets_pc_correctly() {
         // BNE +0x02 (Z clear after reset) should skip over one byte (NOP) to BRK
         let (mut cpu, mut bus) = setup(&[0xD0, 0x01, 0xEA, 0x00]);
-        let c = cpu.step(&mut bus);
+        let c = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c, 3); // taken, no cross
         // Next step should be BRK (0x00) not NOP
-        let c2 = cpu.step(&mut bus);
+        let c2 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         // BRK consumes 7 cycles (legacy semantics) and sets halted
         assert_eq!(c2, 7);
         assert!(cpu.is_halted());

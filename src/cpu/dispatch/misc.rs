@@ -118,40 +118,64 @@ mod tests {
         // LDA #$05; TAX; TAY; TXA; TYA; TSX; TXS; BRK
         let (mut cpu, mut bus) = setup(&[0xA9, 0x05, 0xAA, 0xA8, 0x8A, 0x98, 0xBA, 0x9A, 0x00]);
         // LDA
-        assert_eq!(cpu.step(&mut bus), 2);
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2);
         // TAX
-        assert_eq!(cpu.step(&mut bus), base_cycles(0xAA));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0xAA)
+        );
         assert_eq!(cpu.x(), 0x05);
         // TAY
-        assert_eq!(cpu.step(&mut bus), base_cycles(0xA8));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0xA8)
+        );
         assert_eq!(cpu.y(), 0x05);
         // TXA
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x8A));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x8A)
+        );
         assert_eq!(cpu.a(), 0x05);
         // TYA
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x98));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x98)
+        );
         // TSX
-        assert_eq!(cpu.step(&mut bus), base_cycles(0xBA));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0xBA)
+        );
         // TXS
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x9A));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x9A)
+        );
         // BRK
-        assert_eq!(cpu.step(&mut bus), 7);
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 7);
     }
 
     #[test]
     fn stack_push_pop() {
         // LDA #$AB; PHA; LDA #$00; PLA; BRK
         let (mut cpu, mut bus) = setup(&[0xA9, 0xAB, 0x48, 0xA9, 0x00, 0x68, 0x00]);
-        assert_eq!(cpu.step(&mut bus), 2); // LDA #$AB
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDA #$AB
         let sp_after_lda = cpu.sp();
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x48)); // PHA
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x48)
+        ); // PHA
         assert!(cpu.sp() < sp_after_lda);
-        assert_eq!(cpu.step(&mut bus), 2); // LDA #$00
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDA #$00
         assert_eq!(cpu.a(), 0x00);
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x68)); // PLA
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x68)
+        ); // PLA
         assert_eq!(cpu.a(), 0xAB);
         // BRK
-        assert_eq!(cpu.step(&mut bus), 7);
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 7);
     }
 
     #[test]
@@ -159,28 +183,61 @@ mod tests {
         // SEC; PHP; CLC; PLP; BRK
         let (mut cpu, mut bus) = setup(&[0x38, 0x08, 0x18, 0x28, 0x00]);
         // SEC sets carry
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x38));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x38)
+        );
         // PHP pushes status
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x08));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x08)
+        );
         // CLC clears carry
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x18));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x18)
+        );
         // PLP restores status (carry should be set again)
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x28));
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x28)
+        );
         // BRK
-        assert_eq!(cpu.step(&mut bus), 7);
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 7);
     }
 
     #[test]
     fn flag_ops_basic() {
         // SEC; CLC; SEI; CLI; SED; CLD; CLV; BRK
         let (mut cpu, mut bus) = setup(&[0x38, 0x18, 0x78, 0x58, 0xF8, 0xD8, 0xB8, 0x00]);
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x38)); // SEC
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x18)); // CLC
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x78)); // SEI
-        assert_eq!(cpu.step(&mut bus), base_cycles(0x58)); // CLI
-        assert_eq!(cpu.step(&mut bus), base_cycles(0xF8)); // SED
-        assert_eq!(cpu.step(&mut bus), base_cycles(0xD8)); // CLD
-        assert_eq!(cpu.step(&mut bus), base_cycles(0xB8)); // CLV
-        assert_eq!(cpu.step(&mut bus), 7); // BRK
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x38)
+        ); // SEC
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x18)
+        ); // CLC
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x78)
+        ); // SEI
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0x58)
+        ); // CLI
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0xF8)
+        ); // SED
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0xD8)
+        ); // CLD
+        assert_eq!(
+            crate::cpu::dispatch::step(cpu.state_mut(), &mut bus),
+            base_cycles(0xB8)
+        ); // CLV
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 7); // BRK
     }
 }

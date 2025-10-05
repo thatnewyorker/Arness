@@ -256,9 +256,9 @@ mod tests {
     fn lda_abs_x_page_cross_penalty_applied() {
         // LDX #$01; LDA $12FF,X; BRK
         let (mut cpu, mut bus) = setup(&[0xA2, 0x01, 0xBD, 0xFF, 0x12, 0x00]);
-        let c1 = cpu.step(&mut bus);
+        let c1 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c1, 2); // LDX imm
-        let c2 = cpu.step(&mut bus);
+        let c2 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c2, 5); // LDA abs,X with page cross
     }
 
@@ -266,9 +266,9 @@ mod tests {
     fn sta_abs_x_no_page_cross_penalty() {
         // LDX #$01; STA $12FF,X; BRK
         let (mut cpu, mut bus) = setup(&[0xA2, 0x01, 0x9D, 0xFF, 0x12, 0x00]);
-        let c1 = cpu.step(&mut bus);
+        let c1 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c1, 2); // LDX
-        let c2 = cpu.step(&mut bus);
+        let c2 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         // STA abs,X base is 5 cycles (no extra penalty even if address crosses)
         assert_eq!(c2, 5);
     }

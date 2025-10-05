@@ -168,8 +168,8 @@ mod tests {
     fn adc_abs_x_page_cross_penalty() {
         // LDX #$01; ADC $12FF,X; BRK
         let (mut cpu, mut bus) = setup(&[0xA2, 0x01, 0x7D, 0xFF, 0x12, 0x00]);
-        assert_eq!(cpu.step(&mut bus), 2); // LDX
-        assert_eq!(cpu.step(&mut bus), 5); // ADC abs,X with page cross
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDX
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 5); // ADC abs,X with page cross
     }
 
     #[test]
@@ -179,8 +179,8 @@ mod tests {
         // Prime zero-page pointer at $10 -> $12FF
         bus.write(0x0010, 0xFF);
         bus.write(0x0011, 0x12);
-        assert_eq!(cpu.step(&mut bus), 2); // LDY
-        let cycles = cpu.step(&mut bus);
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDY
+        let cycles = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(cycles, 6); // SBC (ind),Y with page cross
     }
 
@@ -188,8 +188,8 @@ mod tests {
     fn adc_immediate_basic() {
         // LDA #$01; ADC #$02; BRK
         let (mut cpu, mut bus) = setup(&[0xA9, 0x01, 0x69, 0x02, 0x00]);
-        let _ = cpu.step(&mut bus); // LDA
-        let _ = cpu.step(&mut bus); // ADC
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // LDA
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // ADC
         assert_eq!(cpu.a(), 0x03);
     }
 
@@ -197,9 +197,9 @@ mod tests {
     fn sbc_immediate_basic() {
         // LDA #$05; SEC; SBC #$02; BRK  => A = 0x03
         let (mut cpu, mut bus) = setup(&[0xA9, 0x05, 0x38, 0xE9, 0x02, 0x00]);
-        let _ = cpu.step(&mut bus); // LDA
-        let _ = cpu.step(&mut bus); // SEC
-        let _ = cpu.step(&mut bus); // SBC
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // LDA
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // SEC
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // SBC
         assert_eq!(cpu.a(), 0x03);
     }
 }

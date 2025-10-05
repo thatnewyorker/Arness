@@ -224,8 +224,8 @@ mod tests {
     fn asl_accumulator_basic() {
         // LDA #$81; ASL A; BRK
         let (mut cpu, mut bus) = setup(&[0xA9, 0x81, 0x0A, 0x00]);
-        assert_eq!(cpu.step(&mut bus), 2); // LDA
-        let c = cpu.step(&mut bus); // ASL A
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDA
+        let c = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // ASL A
         assert_eq!(c, base_cycles(0x0A));
         assert_eq!(cpu.a(), 0x02);
     }
@@ -234,9 +234,9 @@ mod tests {
     fn inc_zeropage() {
         // LDA #$00; STA $10; INC $10; BRK
         let (mut cpu, mut bus) = setup(&[0xA9, 0x00, 0x85, 0x10, 0xE6, 0x10, 0x00]);
-        assert_eq!(cpu.step(&mut bus), 2); // LDA
-        assert_eq!(cpu.step(&mut bus), 3); // STA
-        let cycles = cpu.step(&mut bus); // INC zp
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDA
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 3); // STA
+        let cycles = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // INC zp
         assert_eq!(cycles, base_cycles(0xE6));
         assert_eq!(bus.read(0x0010), 0x01);
     }
@@ -247,10 +247,10 @@ mod tests {
         let (mut cpu, mut bus) = setup(&[
             0xA2, 0x01, 0xA9, 0x05, 0x9D, 0x00, 0x20, 0xDE, 0x00, 0x20, 0x00,
         ]);
-        assert_eq!(cpu.step(&mut bus), 2); // LDX
-        assert_eq!(cpu.step(&mut bus), 2); // LDA
-        assert_eq!(cpu.step(&mut bus), 5); // STA abs,X
-        let c = cpu.step(&mut bus); // DEC abs,X
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDX
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDA
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 5); // STA abs,X
+        let c = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // DEC abs,X
         assert_eq!(c, base_cycles(0xDE));
         assert_eq!(bus.read(0x2001), 0x04);
     }
@@ -259,7 +259,7 @@ mod tests {
     fn rmw_cycle_parity_example() {
         // Single INC zp instruction followed by BRK; confirm reported cycles match base_cycles.
         let (mut cpu, mut bus) = setup(&[0xE6, 0x20, 0x00]);
-        let c = cpu.step(&mut bus);
+        let c = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(c, base_cycles(0xE6));
     }
 }

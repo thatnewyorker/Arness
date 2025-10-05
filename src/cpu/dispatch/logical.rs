@@ -230,8 +230,8 @@ mod tests {
         // LDX #$01; AND $12FF,X; BRK
         let program = [0xA2, 0x01, 0x3D, 0xFF, 0x12, 0x00];
         let (mut cpu, mut bus) = setup(&program);
-        assert_eq!(cpu.step(&mut bus), 2); // LDX
-        assert_eq!(cpu.step(&mut bus), 5); // AND abs,X with cross
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDX
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 5); // AND abs,X with cross
     }
 
     #[test]
@@ -246,9 +246,9 @@ mod tests {
         // Prime zero-page pointer at $10 -> $12FF
         bus.write(0x0010, 0xFF);
         bus.write(0x0011, 0x12);
-        assert_eq!(cpu.step(&mut bus), 2); // LDY
+        assert_eq!(crate::cpu::dispatch::step(cpu.state_mut(), &mut bus), 2); // LDY
         // Crossing expected adds +1 making total = base(5) + 1 = 6 for ORA (ind),Y w/ cross
-        let cycles = cpu.step(&mut bus);
+        let cycles = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert_eq!(cycles, 6);
     }
 
@@ -261,20 +261,20 @@ mod tests {
         let (mut cpu, mut bus) = setup(&program);
         bus.write(0x0002, 0b1100_0000); // N & V set, Z depends on A & operand AND
         cpu.set_a(0xFF);
-        let c1 = cpu.step(&mut bus);
+        let c1 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
         assert!(c1 >= 3); // BIT zp base cycles
         // Absolute BIT
         bus.write(0x1234, 0b0100_0000); // V set, N clear
         cpu.set_a(0x00); // Ensures Z flag set after BIT abs (A & operand == 0)
-        let _c2 = cpu.step(&mut bus);
+        let _c2 = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus);
     }
 
     #[test]
     fn eor_immediate_updates_accumulator_and_flags() {
         // LDA #$FF; EOR #$FF; BRK  => A becomes 0x00
         let (mut cpu, mut bus) = setup(&[0xA9, 0xFF, 0x49, 0xFF, 0x00]);
-        let _ = cpu.step(&mut bus); // LDA
-        let _ = cpu.step(&mut bus); // EOR
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // LDA
+        let _ = crate::cpu::dispatch::step(cpu.state_mut(), &mut bus); // EOR
         assert_eq!(cpu.a(), 0x00);
     }
 }
